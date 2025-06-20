@@ -1,166 +1,214 @@
-CPU = {}
+local CPU = {}
 
 local bit = require "bit"
 
--- register definitions
-local registers = {
-    R1 = true, -- instruction register
-    R2 = true, -- program counter
-    R3 = true, -- bitwise flags (bit 0 = zero flag)
-    R4 = true,
-    R5 = true,
-    R6 = true,
-    R7 = true,
-    R8 = true,
-    R9 = true,
-    R10 = true,
-    R11 = true,
-    R12 = true,
-    R13 = true,
-    R14 = true,
-    R15 = true,
-    R16 = true
+-- local state (single instance)
+CPU.regs = {
+    [1] = "0x0000", -- instruction register
+    [2] = "0x0000", -- program counter
+    [3] = "0x0000", -- bitwise flags
+    [4] = "0x0000", -- first free register
+    [5] = "0x0000",
+    [6] = "0x0000",
+    [7] = "0x0000",
+    [8] = "0x0000",
+    [9] = "0x0000",
+    [10] = "0x0000",
+    [11] = "0x0000",
+    [12] = "0x0000",
+    [13] = "0x0000",
+    [14] = "0x0000",
+    [15] = "0x0000",
+    [16] = "0x0000"
 }
 
--- map numeric codes 0–15 to register names R1–R16
-local regNames = {
-    [0] = "R1",
-    [1] = "R2",
-    [2] = "R3",
-    [3] = "R4",
-    [4] = "R5",
-    [5] = "R6",
-    [6] = "R7",
-    [7] = "R8",
-    [8] = "R9",
-    [9] = "R10",
-    [10] = "R11",
-    [11] = "R12",
-    [12] = "R13",
-    [13] = "R14",
-    [14] = "R15",
-    [15] = "R16"
-}
+local regs = CPU.regs
+local r = CPU.regs
 
--- helper: combine two bytes into 16-bit word
-local function toWord(lo, hi)
-    return bit.bor(lo, bit.lshift(hi, 8))
+-- flag definitions
+local FLAG_ZERO = 0x1 -- bit 0 of R3
+
+-- combine two 8-bit bytes into a 16-bit word, masked to 0xFFFF
+local function combineBytes(lo, hi)
+    local w = bit.bor(lo, bit.lshift(hi, 8))
+    return bit.band(w, 0xFFFF)
 end
 
--- flag helpers: zero flag is bit 0 of R3
-local function setZeroFlag(cpu, value)
-    if value == 0 then
-        cpu.reg.R3 = bit.bor(cpu.reg.R3, 1)
+-- split a 16-bit word into low and high bytes
+local function splitWord(val)
+    return bit.band(val, 0xFF), bit.rshift(val, 8)
+end
+
+-- set or clear the zero flag (in regs[3])
+local function setZeroFlag(val)
+    if val == 0 then
+        regs[3] = bit.bor(regs[3], FLAG_ZERO)
     else
-        cpu.reg.R3 = bit.band(cpu.reg.R3, bit.bnot(1))
+        regs[3] = bit.band(regs[3], bit.bnot(FLAG_ZERO))
     end
 end
 
-local function zeroFlag(cpu)
-    return bit.band(cpu.reg.R3, 1) == 1
+-- return true if zero flag is set
+local function getZeroFlag()
+    return bit.band(regs[3], FLAG_ZERO) ~= 0
 end
 
--- CPU.ops dispatch table, using minimal 'cpu' instead of 'self'
+
 CPU.ops = {
-    [0x00] = function()
+    ---0x0000: NOP (no operation)
+    ---@param _1 integer ignored
+    ---@param _2 integer ignored
+    ---@param _3 integer ignored
+    [0x0000] = function(_1, _2, _3)
+        -- no state change
     end,
 
-    [0x01] = function(cpu, r, lo, hi)
-        local rn = regNames[r]
-        local v = toWord(lo, hi)
-        cpu.reg[rn] = v
-        setZeroFlag(cpu, v)
+    ---0x0001: SET register to immediate 16-bit value
+    ---@param r integer register index (1–16)
+    ---@param v integer 16-bit immediate value
+    ---@param _3 integer ignored
+    [0x0001] = function(r, v, _3)
+        regs[r] = v
+        setZeroFlag(v)
     end,
 
-    [0x02] = function(cpu, r, lo, hi)
-        local addr = toWord(lo, hi)
-        local lo8 = cpu.mem:load(addr)
-        local hi8 = cpu.mem:load((addr + 1) & 0xFFFF)
-        local v = toWord(lo8, hi8)
-        cpu.reg[regNames[r]] = v
-        setZeroFlag(cpu, v)
+    ---0x0002: LOAD from memory into register
+    ---@param r integer register index (1–16)
+    ---@param addr integer 16-bit memory address
+    ---@param _3 integer ignored
+    [0x0002] = function(r, addr, _3)
+        local val = loadWord(addr)
+        regs[r] = val
+        setZeroFlag(val)
     end,
 
-    [0x03] = function(cpu, r, lo, hi)
-        local addr = toWord(lo, hi)
-        local v = cpu.reg[regNames[r]]
-        cpu.mem:store(addr, bit.band(v, 0xFF))
-        cpu.mem:store((addr + 1) & 0xFFFF, bit.rshift(v, 8))
+    ---0x0003: STORE register into memory
+    ---@param r integer register index (1–16)
+    ---@param addr integer 16-bit memory address
+    ---@param _3 integer ignored
+    [0x0003] = function(r, addr, _3)
+        storeWord(addr, regs[r])
     end,
 
-    [0x04] = function(cpu, d, s1, s2)
-        local a = cpu.reg[regNames[s1]]
-        local b = cpu.reg[regNames[s2]]
-        local res = (a + b) & 0xFFFF
-        cpu.reg[regNames[d]] = res
-        setZeroFlag(cpu, res)
+    ---0x0004: ADD two registers
+    ---@param d integer destination register index
+    ---@param s1 integer source register1 index
+    ---@param s2 integer source register2 index
+    [0x0004] = function(d, s1, s2)
+        local sum = regs[s1] + regs[s2]
+        local res = bit.band(sum, 0xFFFF)
+        regs[d] = res
+        setZeroFlag(res)
     end,
 
-    [0x05] = function(cpu, d, s1, s2)
-        local a = cpu.reg[regNames[s1]]
-        local b = cpu.reg[regNames[s2]]
-        local res = (a - b) & 0xFFFF
-        cpu.reg[regNames[d]] = res
-        setZeroFlag(cpu, res)
+    ---0x0005: SUB subtract registers
+    ---@param d integer destination register index
+    ---@param s1 integer source register1 index
+    ---@param s2 integer source register2 index
+    [0x0005] = function(d, s1, s2)
+        local diff = regs[s1] - regs[s2]
+        local res  = bit.band(diff, 0xFFFF)
+        regs[d] = res
+        setZeroFlag(res)
     end,
 
-    [0x06] = function(cpu, d, s1, s2)
-        local a = cpu.reg[regNames[s1]]
-        local b = cpu.reg[regNames[s2]]
-        local res = (a * b) & 0xFFFF
-        cpu.reg[regNames[d]] = res
-        setZeroFlag(cpu, res)
+    ---0x0006: MUL multiply registers
+    ---@param d integer destination register index
+    ---@param s1 integer source register1 index
+    ---@param s2 integer source register2 index
+    [0x0006] = function(d, s1, s2)
+        local prod = regs[s1] * regs[s2]
+        local res  = bit.band(prod, 0xFFFF)
+        regs[d] = res
+        setZeroFlag(res)
     end,
 
-    [0x07] = function(cpu, d, s1, s2)
-        local a = cpu.reg[regNames[s1]]
-        local b = cpu.reg[regNames[s2]]
-        local res = math.floor(a / (b == 0 and 1 or b)) & 0xFFFF
-        cpu.reg[regNames[d]] = res
-        setZeroFlag(cpu, res)
+    ---0x0007: DIV integer division (avoid divide by zero)
+    ---@param d integer destination register index
+    ---@param s1 integer source register1 index
+    ---@param s2 integer source register2 index
+    [0x0007] = function(d, s1, s2)
+        local denom = regs[s2] == 0 and 1 or regs[s2]
+        local quot  = math.floor(regs[s1] / denom)
+        local res   = bit.band(quot, 0xFFFF)
+        regs[d]     = res
+        setZeroFlag(res)
     end,
 
-    [0x08] = function(cpu, d, s1, s2)
-        local res = bit.band(cpu.reg[regNames[s1]], cpu.reg[regNames[s2]])
-        cpu.reg[regNames[d]] = res
-        setZeroFlag(cpu, res)
+    ---0x0008: AND bitwise
+    ---@param d integer destination register index
+    ---@param s1 integer source register1 index
+    ---@param s2 integer source register2 index
+    [0x0008] = function(d, s1, s2)
+        local res = bit.band(regs[s1], regs[s2])
+        regs[d] = res
+        setZeroFlag(res)
     end,
 
-    [0x09] = function(cpu, d, s1, s2)
-        local res = bit.bor(cpu.reg[regNames[s1]], cpu.reg[regNames[s2]])
-        cpu.reg[regNames[d]] = res
-        setZeroFlag(cpu, res)
+    ---0x0009: OR bitwise
+    ---@param d integer destination register index
+    ---@param s1 integer source register1 index
+    ---@param s2 integer source register2 index
+    [0x0009] = function(d, s1, s2)
+        local res = bit.bor(regs[s1], regs[s2])
+        regs[d] = res
+        setZeroFlag(res)
     end,
 
-    [0x0A] = function(cpu, d, s1, s2)
-        local res = bit.bxor(cpu.reg[regNames[s1]], cpu.reg[regNames[s2]])
-        cpu.reg[regNames[d]] = res
-        setZeroFlag(cpu, res)
+    ---0x000A: XOR bitwise
+    ---@param d integer destination register index
+    ---@param s1 integer source register1 index
+    ---@param s2 integer source register2 index
+    [0x000A] = function(d, s1, s2)
+        local res = bit.bxor(regs[s1], regs[s2])
+        regs[d] = res
+        setZeroFlag(res)
     end,
 
-    [0x0B] = function(cpu, d, s, _)
-        local v = bit.bnot(cpu.reg[regNames[s]]) & 0xFFFF
-        cpu.reg[regNames[d]] = v
-        setZeroFlag(cpu, v)
+    ---0x000B: NOT bitwise
+    ---@param d integer destination register index
+    ---@param s integer source register index
+    ---@param _3 integer ignored
+    [0x000B] = function(d, s, _3)
+        local inv = bit.bnot(regs[s])
+        local res = bit.band(inv, 0xFFFF)
+        regs[d] = res
+        setZeroFlag(res)
     end,
 
-    [0x0C] = function(cpu, lo, hi)
-        cpu.PC = toWord(lo, hi)
+    ---0x000C: JMP unconditional
+    ---@param addr integer 16-bit jump address
+    ---@param _2 integer ignored
+    ---@param _3 integer ignored
+    [0x000C] = function(addr, _2, _3)
+        regs[2] = addr  -- R2 is program counter
     end,
 
-    [0x0D] = function(cpu, lo, hi)
-        if zeroFlag(cpu) then
-            cpu.PC = toWord(lo, hi)
+    ---0x000D: JZ jump if zero flag set
+    ---@param addr integer 16-bit jump address
+    ---@param _2 integer ignored
+    ---@param _3 integer ignored
+    [0x000D] = function(addr, _2, _3)
+        if getZeroFlag() then
+            regs[2] = addr
         end
     end,
 
-    [0x0E] = function(cpu, lo, hi)
-        if not zeroFlag(cpu) then
-            cpu.PC = toWord(lo, hi)
+    ---0x000E: JNZ jump if zero flag not set
+    ---@param addr integer 16-bit jump address
+    ---@param _2 integer ignored
+    ---@param _3 integer ignored
+    [0x000E] = function(addr, _2, _3)
+        if not getZeroFlag() then
+            regs[2] = addr
         end
     end,
 
-    [0x0F] = function()
+    ---0x000F: HALT execution
+    ---@param _1 integer ignored
+    ---@param _2 integer ignored
+    ---@param _3 integer ignored
+    [0x000F] = function(_1, _2, _3)
         error("HALT")
-    end
+    end,
 }
