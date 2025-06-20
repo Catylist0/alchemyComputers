@@ -60,6 +60,7 @@ CPU.ops = {
     ---@param _2 integer ignored
     ---@param _3 integer ignored
     [0x0000] = function(_1, _2, _3)
+        print("NOP")
         -- no state change
     end,
 
@@ -68,6 +69,7 @@ CPU.ops = {
     ---@param v integer 16-bit immediate value
     ---@param _3 integer ignored
     [0x0001] = function(r, v, _3)
+        print(string.format("SET   R%d ← 0x%04X", r, v))
         regs[r] = v
         setZeroFlag(v)
     end,
@@ -78,6 +80,7 @@ CPU.ops = {
     ---@param _3 integer ignored
     [0x0002] = function(r, addr, _3)
         local val = loadWord(addr)
+        print(string.format("LOAD  R%d ← [0x%04X]  (0x%04X)", r, addr, val))
         regs[r] = val
         setZeroFlag(val)
     end,
@@ -87,7 +90,9 @@ CPU.ops = {
     ---@param addr integer 16-bit memory address
     ---@param _3 integer ignored
     [0x0003] = function(r, addr, _3)
-        storeWord(addr, regs[r])
+        local val = regs[r]
+        print(string.format("STORE [0x%04X] ← R%d  (0x%04X)", addr, r, val))
+        storeWord(addr, val)
     end,
 
     ---0x0004: ADD two registers
@@ -97,6 +102,7 @@ CPU.ops = {
     [0x0004] = function(d, s1, s2)
         local sum = regs[s1] + regs[s2]
         local res = bit.band(sum, 0xFFFF)
+        print(string.format("ADD   R%d ← R%d + R%d  (0x%04X)", d, s1, s2, res))
         regs[d] = res
         setZeroFlag(res)
     end,
@@ -108,6 +114,7 @@ CPU.ops = {
     [0x0005] = function(d, s1, s2)
         local diff = regs[s1] - regs[s2]
         local res  = bit.band(diff, 0xFFFF)
+        print(string.format("SUB   R%d ← R%d - R%d  (0x%04X)", d, s1, s2, res))
         regs[d] = res
         setZeroFlag(res)
     end,
@@ -119,6 +126,7 @@ CPU.ops = {
     [0x0006] = function(d, s1, s2)
         local prod = regs[s1] * regs[s2]
         local res  = bit.band(prod, 0xFFFF)
+        print(string.format("MUL   R%d ← R%d * R%d  (0x%04X)", d, s1, s2, res))
         regs[d] = res
         setZeroFlag(res)
     end,
@@ -131,7 +139,8 @@ CPU.ops = {
         local denom = regs[s2] == 0 and 1 or regs[s2]
         local quot  = math.floor(regs[s1] / denom)
         local res   = bit.band(quot, 0xFFFF)
-        regs[d]     = res
+        print(string.format("DIV   R%d ← R%d / R%d  (0x%04X)", d, s1, s2, res))
+        regs[d] = res
         setZeroFlag(res)
     end,
 
@@ -141,6 +150,7 @@ CPU.ops = {
     ---@param s2 integer source register2 index
     [0x0008] = function(d, s1, s2)
         local res = bit.band(regs[s1], regs[s2])
+        print(string.format("AND   R%d ← R%d & R%d  (0x%04X)", d, s1, s2, res))
         regs[d] = res
         setZeroFlag(res)
     end,
@@ -151,6 +161,7 @@ CPU.ops = {
     ---@param s2 integer source register2 index
     [0x0009] = function(d, s1, s2)
         local res = bit.bor(regs[s1], regs[s2])
+        print(string.format("OR    R%d ← R%d | R%d  (0x%04X)", d, s1, s2, res))
         regs[d] = res
         setZeroFlag(res)
     end,
@@ -161,6 +172,7 @@ CPU.ops = {
     ---@param s2 integer source register2 index
     [0x000A] = function(d, s1, s2)
         local res = bit.bxor(regs[s1], regs[s2])
+        print(string.format("XOR   R%d ← R%d ~ R%d  (0x%04X)", d, s1, s2, res))
         regs[d] = res
         setZeroFlag(res)
     end,
@@ -172,6 +184,7 @@ CPU.ops = {
     [0x000B] = function(d, s, _3)
         local inv = bit.bnot(regs[s])
         local res = bit.band(inv, 0xFFFF)
+        print(string.format("NOT   R%d ← ~R%d      (0x%04X)", d, s, res))
         regs[d] = res
         setZeroFlag(res)
     end,
@@ -181,6 +194,7 @@ CPU.ops = {
     ---@param _2 integer ignored
     ---@param _3 integer ignored
     [0x000C] = function(addr, _2, _3)
+        print(string.format("JMP   PC ← 0x%04X", addr))
         regs[2] = addr  -- R2 is program counter
     end,
 
@@ -190,7 +204,10 @@ CPU.ops = {
     ---@param _3 integer ignored
     [0x000D] = function(addr, _2, _3)
         if getZeroFlag() then
+            print(string.format("JZ    PC ← 0x%04X (zero)", addr))
             regs[2] = addr
+        else
+            print("JZ    skipped (non-zero)")
         end
     end,
 
@@ -200,7 +217,10 @@ CPU.ops = {
     ---@param _3 integer ignored
     [0x000E] = function(addr, _2, _3)
         if not getZeroFlag() then
+            print(string.format("JNZ   PC ← 0x%04X (non-zero)", addr))
             regs[2] = addr
+        else
+            print("JNZ   skipped (zero)")
         end
     end,
 
@@ -209,6 +229,7 @@ CPU.ops = {
     ---@param _2 integer ignored
     ---@param _3 integer ignored
     [0x000F] = function(_1, _2, _3)
+        print("HALT")
         error("HALT")
     end,
 }
