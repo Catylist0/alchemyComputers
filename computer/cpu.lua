@@ -1,11 +1,13 @@
 CPU = {}
 
--- ==================== REGISTERS ====================
-local registers = { -- 16bit registers
+local bit = require "bit"
+
+-- register definitions
+local registers = {
     R1 = true, -- instruction register
     R2 = true, -- program counter
-    R3 = true, -- flags
-    R4 = true, -- first free register
+    R3 = true, -- bitwise flags (bit 0 = zero flag)
+    R4 = true,
     R5 = true,
     R6 = true,
     R7 = true,
@@ -20,85 +22,145 @@ local registers = { -- 16bit registers
     R16 = true
 }
 
-for i, register in pairs(registers) do
-    local blankRegister = {}
-    for j = 1, 16 do
-        blankRegister[j] = false
-    end
-    registers[i] = blankRegister
+-- map numeric codes 0–15 to register names R1–R16
+local regNames = {
+    [0] = "R1",
+    [1] = "R2",
+    [2] = "R3",
+    [3] = "R4",
+    [4] = "R5",
+    [5] = "R6",
+    [6] = "R7",
+    [7] = "R8",
+    [8] = "R9",
+    [9] = "R10",
+    [10] = "R11",
+    [11] = "R12",
+    [12] = "R13",
+    [13] = "R14",
+    [14] = "R15",
+    [15] = "R16"
+}
+
+-- helper: combine two bytes into 16-bit word
+local function toWord(lo, hi)
+    return bit.bor(lo, bit.lshift(hi, 8))
 end
 
--- ==================== INSTRUCITON OPERATION ====================
+-- flag helpers: zero flag is bit 0 of R3
+local function setZeroFlag(cpu, value)
+    if value == 0 then
+        cpu.reg.R3 = bit.bor(cpu.reg.R3, 1)
+    else
+        cpu.reg.R3 = bit.band(cpu.reg.R3, bit.bnot(1))
+    end
+end
 
--- dispatch table
+local function zeroFlag(cpu)
+    return bit.band(cpu.reg.R3, 1) == 1
+end
+
+-- CPU.ops dispatch table, using minimal 'cpu' instead of 'self'
 CPU.ops = {
     [0x00] = function()
     end,
-    [0x01] = function(self, r, lo, hi)
-        self.reg[r] = bit32.bor(lo, bit32.lshift(hi, 8))
-        self.zero_flag = (self.reg[r] == 0)
+
+    [0x01] = function(cpu, r, lo, hi)
+        local rn = regNames[r]
+        local v = toWord(lo, hi)
+        cpu.reg[rn] = v
+        setZeroFlag(cpu, v)
     end,
-    [0x02] = function(self, r, lo, hi)
-        local addr = bit32.bor(lo, bit32.lshift(hi, 8))
-        local lo8 = self.mem:load(addr)
-        local hi8 = self.mem:load((addr + 1) & 0xFFFF)
-        self.reg[r] = bit32.bor(lo8, bit32.lshift(hi8, 8))
-        self.zero_flag = (self.reg[r] == 0)
+
+    [0x02] = function(cpu, r, lo, hi)
+        local addr = toWord(lo, hi)
+        local lo8 = cpu.mem:load(addr)
+        local hi8 = cpu.mem:load((addr + 1) & 0xFFFF)
+        local v = toWord(lo8, hi8)
+        cpu.reg[regNames[r]] = v
+        setZeroFlag(cpu, v)
     end,
-    [0x03] = function(self, r, lo, hi)
-        local addr = bit32.bor(lo, bit32.lshift(hi, 8))
-        local val = self.reg[r]
-        self.mem:store(addr, bit32.band(val, 0xFF))
-        self.mem:store((addr + 1) & 0xFFFF, bit32.rshift(val, 8))
+
+    [0x03] = function(cpu, r, lo, hi)
+        local addr = toWord(lo, hi)
+        local v = cpu.reg[regNames[r]]
+        cpu.mem:store(addr, bit.band(v, 0xFF))
+        cpu.mem:store((addr + 1) & 0xFFFF, bit.rshift(v, 8))
     end,
-    [0x04] = function(self, d, s1, s2)
-        local res = (self.reg[s1] + self.reg[s2]) & 0xFFFF
-        self.reg[d], self.zero_flag = res, (res == 0)
+
+    [0x04] = function(cpu, d, s1, s2)
+        local a = cpu.reg[regNames[s1]]
+        local b = cpu.reg[regNames[s2]]
+        local res = (a + b) & 0xFFFF
+        cpu.reg[regNames[d]] = res
+        setZeroFlag(cpu, res)
     end,
-    [0x05] = function(self, d, s1, s2)
-        local res = (self.reg[s1] - self.reg[s2]) & 0xFFFF
-        self.reg[d], self.zero_flag = res, (res == 0)
+
+    [0x05] = function(cpu, d, s1, s2)
+        local a = cpu.reg[regNames[s1]]
+        local b = cpu.reg[regNames[s2]]
+        local res = (a - b) & 0xFFFF
+        cpu.reg[regNames[d]] = res
+        setZeroFlag(cpu, res)
     end,
-    [0x06] = function(self, d, s1, s2)
-        local res = (self.reg[s1] * self.reg[s2]) & 0xFFFF
-        self.reg[d], self.zero_flag = res, (res == 0)
+
+    [0x06] = function(cpu, d, s1, s2)
+        local a = cpu.reg[regNames[s1]]
+        local b = cpu.reg[regNames[s2]]
+        local res = (a * b) & 0xFFFF
+        cpu.reg[regNames[d]] = res
+        setZeroFlag(cpu, res)
     end,
-    [0x07] = function(self, d, s1, s2)
-        local res = math.floor(self.reg[s1] / (self.reg[s2] == 0 and 1 or self.reg[s2]))
-        self.reg[d], self.zero_flag = res & 0xFFFF, (res == 0)
+
+    [0x07] = function(cpu, d, s1, s2)
+        local a = cpu.reg[regNames[s1]]
+        local b = cpu.reg[regNames[s2]]
+        local res = math.floor(a / (b == 0 and 1 or b)) & 0xFFFF
+        cpu.reg[regNames[d]] = res
+        setZeroFlag(cpu, res)
     end,
-    [0x08] = function(self, d, s1, s2)
-        local res = bit32.band(self.reg[s1], self.reg[s2])
-        self.reg[d], self.zero_flag = res, (res == 0)
+
+    [0x08] = function(cpu, d, s1, s2)
+        local res = bit.band(cpu.reg[regNames[s1]], cpu.reg[regNames[s2]])
+        cpu.reg[regNames[d]] = res
+        setZeroFlag(cpu, res)
     end,
-    [0x09] = function(self, d, s1, s2)
-        local res = bit32.bor(self.reg[s1], self.reg[s2])
-        self.reg[d], self.zero_flag = res, (res == 0)
+
+    [0x09] = function(cpu, d, s1, s2)
+        local res = bit.bor(cpu.reg[regNames[s1]], cpu.reg[regNames[s2]])
+        cpu.reg[regNames[d]] = res
+        setZeroFlag(cpu, res)
     end,
-    [0x0A] = function(self, d, s1, s2)
-        local res = bit32.bxor(self.reg[s1], self.reg[s2])
-        self.reg[d], self.zero_flag = res, (res == 0)
+
+    [0x0A] = function(cpu, d, s1, s2)
+        local res = bit.bxor(cpu.reg[regNames[s1]], cpu.reg[regNames[s2]])
+        cpu.reg[regNames[d]] = res
+        setZeroFlag(cpu, res)
     end,
-    [0x0B] = function(self, d, s, _)
-        local res = bit32.bnot(self.reg[s]) & 0xFFFF
-        self.reg[d], self.zero_flag = res, (res == 0)
+
+    [0x0B] = function(cpu, d, s, _)
+        local v = bit.bnot(cpu.reg[regNames[s]]) & 0xFFFF
+        cpu.reg[regNames[d]] = v
+        setZeroFlag(cpu, v)
     end,
-    [0x0C] = function(self, lo, hi)
-        self.PC = bit32.bor(lo, bit32.lshift(hi, 8))
+
+    [0x0C] = function(cpu, lo, hi)
+        cpu.PC = toWord(lo, hi)
     end,
-    [0x0D] = function(self, lo, hi)
-        if self.zero_flag then
-            self.PC = bit32.bor(lo, bit32.lshift(hi, 8))
+
+    [0x0D] = function(cpu, lo, hi)
+        if zeroFlag(cpu) then
+            cpu.PC = toWord(lo, hi)
         end
     end,
-    [0x0E] = function(self, lo, hi)
-        if not self.zero_flag then
-            self.PC = bit32.bor(lo, bit32.lshift(hi, 8))
+
+    [0x0E] = function(cpu, lo, hi)
+        if not zeroFlag(cpu) then
+            cpu.PC = toWord(lo, hi)
         end
     end,
-    [0x0F] = function(self)
+
+    [0x0F] = function()
         error("HALT")
     end
 }
-
--- Entrypoint
