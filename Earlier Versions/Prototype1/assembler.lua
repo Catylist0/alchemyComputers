@@ -42,40 +42,37 @@ local SyntaxLookup = {
 }
 
 --- Parses a single line of assembly, validates syntax, and appends 4 words to bytecodechunks.
+--- Prints each token as it’s parsed.
 ---@param line string Assembly source line
 ---@param lineNum integer Line number in source (for error reporting)
 ---@param bytecodechunks table Array to append 16-bit words to
 local function parseLine(line, lineNum, bytecodechunks)
-    -- collect tokens until a comment or end‐of‐line
+    -- collect tokens until a comment or end-of-line, printing each one
     local tokens = {}
     for token in line:gmatch("%S+") do
         if token:sub(1,2) == "--" then break end
+        print(("Line %d: Parsed token '%s'"):format(lineNum, token))
         tokens[#tokens+1] = token
     end
 
     if #tokens == 0 then
-        -- blank or comment‐only line: no output
         return
     end
 
-    -- lookup opcode
     local mnem   = tokens[1]
     local opcode = OPCODES[mnem]
     if not opcode then
         error(("Line %d: Unknown opcode '%s'"):format(lineNum, mnem), 0)
     end
 
-    -- lookup expected syntax
     local entry = SyntaxLookup[opcode]
     if not entry then
         error(("Line %d: No syntax for opcode 0x%04X"):format(lineNum, opcode), 0)
     end
 
-    -- count expected operands by counting placeholders in syntax string
     local expected = 0
     for _ in entry.syntax:gmatch("<%w+>") do expected = expected + 1 end
 
-    -- count actual operands
     local actual = #tokens - 1
     if actual < expected then
         error(("Line %d: Too few operands for '%s' - expected %d, got %d"):format(
@@ -88,37 +85,35 @@ local function parseLine(line, lineNum, bytecodechunks)
         ), 0)
     end
 
-    -- build this instruction's words
     local chunks = { opcode }
     for i = 1, expected do
         local tok = tokens[i+1]
         if tok:sub(1,1):lower() == "r" then
-            -- register operand
             local idx = tonumber(tok:sub(2))
             if not idx or idx < 1 or idx > 16 then
                 error(("Line %d: Invalid register '%s'"):format(lineNum, tok), 0)
             end
+            print(("Line %d: Register operand %d"):format(lineNum, idx))
             chunks[#chunks+1] = idx
         else
-            -- immediate/address operand
             local num = tonumber(tok)
             if not num then
                 error(("Line %d: Invalid operand '%s'"):format(lineNum, tok), 0)
             end
+            print(("Line %d: Immediate operand 0x%04X"):format(lineNum, bit.band(num,0xFFFF)))
             chunks[#chunks+1] = bit.band(num, 0xFFFF)
         end
     end
 
-    -- pad to exactly 4 words
     while #chunks < 4 do
         chunks[#chunks+1] = 0x0000
     end
 
-    -- append into the global bytecode array
     for _, w in ipairs(chunks) do
         bytecodechunks[#bytecodechunks+1] = w
     end
 end
+
 
 --- Encodes a multi-line assembly string into a flat array of 16-bit words.
 ---@param src string Assembly source text

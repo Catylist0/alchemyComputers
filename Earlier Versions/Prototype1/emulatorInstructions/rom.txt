@@ -1,4 +1,4 @@
 SET r4 1
 -- This is a comment
-COPY r5 r4
+SET r5 r4
 ADD r6 r4 r5
