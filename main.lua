@@ -8,3 +8,5 @@ cols = tonumber(cols)
 
 -- Clear screen and move cursor to bottom-left
 io.write("\27[2J", string.format("\27[%d;1H", rows))
+
+local Hardware = require "hardware"
