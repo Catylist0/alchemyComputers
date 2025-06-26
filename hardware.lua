@@ -6,7 +6,7 @@ Hardware.bus = {
     address = 0x0000, -- address bus
     writeLine = false, -- boolean flag indicating if the bus is in a read cycle
     resetLine = false, -- boolean flag indicating if the reset line is active
-    clock = true, -- boolean flag indicating if the clock is high
+    clock = true -- boolean flag indicating if the clock is high
 }
 
 Hardware.ram = {}
@@ -22,14 +22,18 @@ do
     local ram = Hardware.ram
 
     function ram.read()
-        if Hardware.bus.writeLine then return nil end -- If the bus is in a write cycle, do nothing
+        if Hardware.bus.writeLine then
+            return nil
+        end -- If the bus is in a write cycle, do nothing
         local address = Hardware.bus.address
         local value = ram[address]
         Hardware.bus.data = value
     end
 
     function ram.write()
-        if not Hardware.bus.writeLine then return nil end -- If the bus is not in a write cycle, do nothing
+        if not Hardware.bus.writeLine then
+            return nil
+        end -- If the bus is not in a write cycle, do nothing
         local address = Hardware.bus.address
         local value = Hardware.bus.data
         ram[address] = value
@@ -37,13 +41,13 @@ do
 end
 
 Hardware.cpu = {}
-do 
+do
     local cpu = Hardware.cpu
 
     cpu.miscMemory = {
         programCounter = 0x0000, -- holds the address of the next instruction to execute
         flagWasNegative = false, -- boolean flag indicating if the last instruction resulted in a negative value
-        flagWasZero = false, -- boolean flag indicating if the last instruction resulted in a zero value
+        flagWasZero = false -- boolean flag indicating if the last instruction resulted in a zero value
     }
 
     cpu.registers = {
@@ -66,45 +70,142 @@ do
     }
 
     cpu.decoder = {
-        opsWillOverflow = {},
-        overflowRegister = 0x0000, -- holds the overflow value from the last operation if need be
-        overflowFlag = false, -- boolean flag indicating if the last operation resulted in an overflow
-        contentBus = 0x000000, -- sends the content of the instruction with an extremely short 24-bit bus
-        destinationBus = 0x0, -- holds the destination register for the instruction with a 4-bit bus
-        opcodeBus = 0x0, -- holds the opcode for the instruction with a 4-bit bus
-        decode = function()
-            -- decode the instruction from the first half of the word (the lower half of the word)
-            --local data = Hardware.bus.data
-            --cpu.decoder.opcodeBus = bit.band(data, 0xF0) -- first 4 bits are the opcode (total of 16 opcodes)
-            --cpu.decoder.destinationBus = bit.band(data, 0x0F0) -- next 4 bits are the destination register (total of 16 registers)
-            -- the content line are the remaining 8 bits, which are used for the operation
-            --cpu.decoder.contentBus = bit.band(data, 0x00FF) -- last 8 bits
+        twoCycleOpcodes = {
+            [0x1] = true,  -- LOAD   (24-bit)
+            [0x2] = true,  -- STORE  (24-bit)
+            [0x3] = true,  -- ADDI   (28-bit)
+            [0x6] = true,  -- JMP    (20-bit)
+            [0x7] = true,  -- JMPZ   (20-bit)
+            [0x8] = true,  -- JMPN   (20-bit)
+        },
+        pendingFetch   = false,
+        overflowRegister = 0x0000,  -- holds entire first 16-bit fetch
+        opcodeBus      = 0x0,
+        destinationBus = 0x0,
+        contentBus     = 0x000000,
 
-            local chunks = {bit.rshift(Hardware.bus.data, 12), bit.band(bit.rshift(Hardware.bus.data, 8), 0x0F), bit.band(bit.rshift(Hardware.bus.data, 4), 0x0F), bit.band(Hardware.bus.data, 0x0F)} -- split the 16-bit data into 4 4-bit chunks
-            
-            if cpu.decoder.opsWillOverflow[chunks[1]] and not cpu.decoder.overflowFlag then
-                cpu.decoder.overflowFlag = true -- set the overflow flag if the operation will overflow
+        decode = function()
+            local raw = Hardware.bus.data  -- first 16 bits
+
+            if not cpu.decoder.pendingFetch then
+                local top  = bit.rshift(raw, 12)
+                local dest = bit.band(bit.rshift(raw, 8), 0xF)
+
+                cpu.decoder.opcodeBus      = top
+                cpu.decoder.destinationBus = dest
+
+                if cpu.decoder.twoCycleOpcodes[top] then
+                    cpu.decoder.pendingFetch   = true
+                    cpu.decoder.overflowRegister = raw
+                    cpu.clock = false
+                    return
+                end
+
+                cpu.decoder.contentBus = bit.band(raw, 0xFF)
+                return
             end
-            if not cpu.decoder.overFlowFlag then
-                cpu.clock = false -- if the overflow flag is not set, then the clock is false to simulate a stall
-            else
-                -- all the chunks are sent to the overflow register
-                cpu.decoder.overflowRegister = Hardware.bus.data
-                cpu.decoder.opcodeBus = 0x0000 -- reset the overflow register
-            end
+
+            -- second half
+            local ext = Hardware.bus.data
+            local first = cpu.decoder.overflowRegister
+            local low   = bit.band(first, 0xFF)
+
+            cpu.decoder.opcodeBus      = bit.rshift(first, 12)
+            cpu.decoder.destinationBus = bit.band(bit.rshift(first, 8), 0xF)
+            cpu.decoder.contentBus     = bit.bor(bit.lshift(low, 16), bit.band(ext, 0xFFFF))
+
+            cpu.decoder.pendingFetch = false
         end,
+
         execute = function()
-            operations[cpu.decoder.opcodeBus](cpu.decoder.destinationBus, cpu.decoder.contentBus)
-        end
-            
+            local opc = cpu.decoder.opcodeBus
+            local dst = cpu.decoder.destinationBus
+            local arg = cpu.decoder.contentBus
+            cpu.instructions[opc](dst, arg)
+        end,
     }
 
-    cpu.instructions = {}
+    cpu.instructions = {
+        [0x0] = function() end,    -- NOP
 
-    -- Define the instructions as they would be in the CPU
-    local instructs = cpu.instructions
+        [0x1] = function(rd, addr) -- LOAD  Rd, addr
+            Hardware.bus.writeLine = false -- Set the bus to read mode
+            Hardware.bus.address = addr -- Set the address to the given address
+            Hardware.ram.read()
+            Hardware.cpu.registers[rd] = Hardware.bus.data -- Direct the data from the bus into the register
+            Hardware.bus.data = 0x0000 -- Clear the bus data
+            Hardware.bus.address = 0x0000 -- Clear the bus address
+        end,
 
-    --[[LOAD -- load an address to a register with an input register as an offset amount
+        [0x2] = function(rd, addr) -- STORE Rd, addr
+            Hardware.bus.writeLine = true -- Set the bus to write mode
+            Hardware.bus.address = addr -- Set the address to the given address
+            Hardware.bus.data = Hardware.cpu.registers[rd] -- Set the data to the value
+            Hardware.ram.write() -- Write the data to RAM
+            Hardware.bus.writeLine = false -- Reset the bus to read mode
+            Hardware.bus.data = 0x0000 -- Clear the bus data
+            Hardware.bus.address = 0x0000 -- Clear the bus address
+        end,
+
+        [0x3] = function(rd, rn, imm) -- ADDI Rd, Rn, Imm
+            Hardware.cpu.registers[rd] = Hardware.cpu.registers[rn] + imm
+        end,
+
+        [0x4] = function(rd, rn, rm) -- ADDR Rd, Rn, Rm
+            Hardware.cpu.registers[rd] = Hardware.cpu.registers[rn] + Hardware.cpu.registers[rm]
+        end,
+
+        [0x5] = function(rd, rn, rm) -- SUBR Rd, Rn, Rm
+            local result = Hardware.cpu.registers[rn] - Hardware.cpu.registers[rm]
+            Hardware.cpu.miscMemory.flagWasZero     = (result == 0)
+            Hardware.cpu.miscMemory.flagWasNegative = (result < 0)
+            Hardware.cpu.registers[rd]              = result
+        end,
+
+        [0x6] = function(link, addr) -- JMP [link?], addr
+            Hardware.cpu.miscMemory.programCounter = addr
+            if link ~= 0 then
+                Hardware.cpu.registers[1] = addr
+            end
+        end,
+
+        [0x7] = function(link, addr) -- JMPZ [link?], addr
+            if Hardware.cpu.miscMemory.flagWasZero then
+                Hardware.cpu.miscMemory.programCounter = addr
+                if link ~= 0 then Hardware.cpu.registers[1] = addr end
+            end
+        end,
+
+        [0x8] = function(link, addr) -- JMPN [link?], addr
+            if Hardware.cpu.miscMemory.flagWasNegative then
+                Hardware.cpu.miscMemory.programCounter = addr
+                if link ~= 0 then Hardware.cpu.registers[1] = addr end
+            end
+        end,
+
+        [0x9] = function(rd, rn, rm) -- NAND Rd, Rn, Rm
+            local result = bit.bnot(bit.band(
+                Hardware.cpu.registers[rn],
+                Hardware.cpu.registers[rm]
+            ))
+            Hardware.cpu.registers[rd] = result
+        end,
+
+        [0xA] = function(rd, rn) -- SHIFTL Rd, Rn
+            Hardware.cpu.registers[rd] = bit.lshift(Hardware.cpu.registers[rn], 1)
+        end,
+
+        [0xB] = function(rd, rn) -- SHIFTR Rd, Rn
+            Hardware.cpu.registers[rd] = bit.rshift(Hardware.cpu.registers[rn], 1)
+        end,
+    }
+
+
+
+    --[[
+        The instruction set is as follows:
+        NOP -- no operation, does nothing
+        LOAD -- load an address to a register with an input register as an offset amount
         STORE -- store a register to an address with an input register as an offset amount
         ADDI -- add an immediate number to a register
         ADDR -- add a register to another register
@@ -119,6 +220,7 @@ do
         SHIFTR -- bitwise shift right operator (halving)
 
         Syntax and instruction smallest possible size:
+        NOP (0 bits)
         LOAD Rd <address> (24 bits)
         STORE Rd <address> (24 bits)
         ADDI Rd Rn Imm (28 bits)
@@ -135,11 +237,11 @@ do
         before executing by analyzing the instruction codes and stalling out the cycle.
         ]]
 
-    local clock = true
+    cpu.clock = true
 
     function cpu.cycle()
-        clock = true
-        if hardware.bus.resetline then
+        cpu.clock = true
+        if Hardware.bus.resetLine then
             cpu.miscMemory.programCounter = 0x0000
             cpu.miscMemory.flagWasNegative = false
             cpu.miscMemory.flagWasZero = false
@@ -155,12 +257,14 @@ do
         -- Decode
         cpu.decoder.decode()
 
-        if not clock then
+        if not cpu.clock then
             -- If the clock is low, we need to wait for the next cycle as we have stalled
             return
         end
 
         -- Execute
+
+        cpu.decoder.execute()
 
         -- Read
         Hardware.ram.read()
@@ -168,13 +272,12 @@ do
         -- Increment the program counter
         cpu.miscMemory.programCounter = cpu.miscMemory.programCounter + 1
 
-        clock = false -- Cycle the clock to simulate the low part of the clock cycle and simulate DDRAM access
+        cpu.clock = false -- Cycle the clock to simulate the low part of the clock cycle and simulate DDRAM access
 
         -- Write
         Hardware.ram.write()
     end
 
-    Hardware.cpu = cpu
 end
 
 return Hardware
