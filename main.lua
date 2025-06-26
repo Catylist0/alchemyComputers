@@ -1,12 +1,14 @@
 local version = "0.0.1"
 
-local handle = io.popen("stty size", "r")
-local output = handle:read("*l")
-handle:close()
+local function getTerminalSize()
+    local handle = io.popen("stty size", "r")
+    local output = handle:read("*l")
+    handle:close()
+    local r, c = output:match("^(%d+)%s+(%d+)$")
+    return tonumber(r), tonumber(c)
+end
 
-local rows, cols = output:match("^(%d+)%s+(%d+)$")
-rows = tonumber(rows)
-cols = tonumber(cols)
+local rows, cols = getTerminalSize()
 
 -- Clear screen and move cursor to bottom-left
 io.write("\27[2J", string.format("\27[%d;1H", rows))
@@ -15,23 +17,22 @@ local Hardware = require "hardware"
 local buf = {}
 
 local function renderLine(n, txt)
-    buf[n] = txt or "<???>"
+    buf[n] = txt
 end
 
 local function flush()
     io.write("\27[2J")
     for i = 1, rows do
-        io.write(("\27[%d;1H%s"):format(i, buf[i] or "<???>"))
+        io.write(("\27[%d;1H%s"):format(i, buf[i] or ""))
     end
     io.write(("\27[%d;1H"):format(rows))
 end
 
 local phaseHistory = {}
 
-function debugDisplay(phase)
+local function displayFunction(phase)
+    rows, cols = getTerminalSize()
     table.insert(phaseHistory, phase)
-    flush()
-
     buf = {}
 
     -- Header
@@ -43,12 +44,12 @@ function debugDisplay(phase)
     do
         local rn = 0
         for row = 1, 4 do
-            local cols = {}
+            local colsTbl = {}
             for col = 1, 4 do
-                cols[#cols + 1] = ("R%02X:0x%04X"):format(rn, Hardware.cpu.registers[rn] or 0)
+                colsTbl[#colsTbl + 1] = ("R%02X:0x%04X"):format(rn, Hardware.cpu.registers[rn] or 0)
                 rn = rn + 1
             end
-            renderLine(3 + row, table.concat(cols, " | "))
+            renderLine(3 + row, table.concat(colsTbl, " | "))
         end
     end
 
@@ -75,7 +76,7 @@ function debugDisplay(phase)
     renderLine(25, ("DestBus:       0x%X"):format(Hardware.cpu.decoder.destinationBus or 0))
     renderLine(26, ("ContentBus:    0x%06X"):format(Hardware.cpu.decoder.contentBus or 0))
 
-    -- history (rendering as much until the end of the screen -1)
+    -- History
     renderLine(28, "History:")
     local historyStart = 29
     for i = 1, #phaseHistory do
@@ -84,10 +85,11 @@ function debugDisplay(phase)
         end
     end
 
-    os.execute("sleep 0.5")
+    flush()
+    os.execute("sleep 1")
 end
 
-Hardware.bus.resetLine = true -- Set the reset line to true
+Hardware.bus.resetLine = true
 
 while true do
     Hardware.cpu.cycle(displayFunction)

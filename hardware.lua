@@ -231,6 +231,7 @@ do
 
     function cpu.cycle(displayFunction)
         if not displayFunction then
+            print("No display function provided, using default no-op.")
             displayFunction = function() end -- Default to a no-op if no display function is provided
         end
         cpu.clock = true
