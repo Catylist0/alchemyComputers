@@ -12,14 +12,13 @@ Hardware.bus = {
 Hardware.mem = {}
 
 function formatMem()
-    Hardware.mem[0x0000] = 0x0000 -- Initialize the first byte to nop (Temporary)
     for i = 0x0100, 0xFFFF do -- the first 256 bytes are reserved for the ROM firmware
         Hardware.mem[i] = 0x0000 -- Initialize mem with zeroes
     end
+    Hardware.mem[0x0000] = 0x0000 -- Initialize the first byte to nop (Temporary)
 end
 
 do
-    formatMem() -- Initialize memory with zeroes
     local mem = Hardware.mem
 
     function mem.read()
@@ -243,6 +242,11 @@ do
             cpu.miscMemory.flagWasZero = false
             cpu.miscMemory.shouldAdvancePC = true -- Reset the flag to allow PC to advance
             cpu.decoder.overflowRegister = 0x0000
+            cpu.decoder.pendingFetch = false
+            for i = 0, 15 do
+                cpu.registers[i] = 0x0000 -- Reset all registers to zero
+            end
+            cpu.miscMemory.resetLine = false -- Reset the reset line
         end
 
         displayFunction("Top of cycle: Fetching...")

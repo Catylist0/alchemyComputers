@@ -27,6 +27,7 @@ local function flush()
 end
 
 local phaseHistory = {}
+
 function debugDisplay(phase)
     table.insert(phaseHistory, phase)
     flush()
