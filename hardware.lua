@@ -115,14 +115,7 @@ do
             cpu.decoder.contentBus     = bit.bor(bit.lshift(low, 16), bit.band(ext, 0xFFFF))
 
             cpu.decoder.pendingFetch = false
-        end,
-
-        execute = function()
-            local opc = cpu.decoder.opcodeBus
-            local dst = cpu.decoder.destinationBus
-            local arg = cpu.decoder.contentBus
-            cpu.instructions[opc](dst, arg)
-        end,
+        end
     }
 
     cpu.instructions = {
@@ -162,24 +155,20 @@ do
             Hardware.cpu.registers[rd]              = result
         end,
 
-        [0x6] = function(link, addr) -- JMP [link?], addr
+        [0x6] = function(addr) -- JMP, addr
             Hardware.cpu.miscMemory.programCounter = addr
-            if link ~= 0 then
-                Hardware.cpu.registers[1] = addr
-            end
+            Hardware.cpu.registers[1] = addr
         end,
 
-        [0x7] = function(link, addr) -- JMPZ [link?], addr
+        [0x7] = function(addr) -- JMPZ [link?], addr
             if Hardware.cpu.miscMemory.flagWasZero then
                 Hardware.cpu.miscMemory.programCounter = addr
-                if link ~= 0 then Hardware.cpu.registers[1] = addr end
             end
         end,
 
-        [0x8] = function(link, addr) -- JMPN [link?], addr
+        [0x8] = function(addr) -- JMPN [link?], addr
             if Hardware.cpu.miscMemory.flagWasNegative then
                 Hardware.cpu.miscMemory.programCounter = addr
-                if link ~= 0 then Hardware.cpu.registers[1] = addr end
             end
         end,
 
@@ -264,18 +253,20 @@ do
 
         -- Execute
 
-        cpu.decoder.execute()
-
-        -- Read
-        Hardware.ram.read()
+        -- split the 24 bit content bus into 4 bit chunks
+        local executionChunks = {}
+        for i = 1, 5 do -- ignore the first 4 bits as they are the opcode
+            local chunk = bit.band(bit.rshift(cpu.decoder.contentBus, i * 4), 0xF)
+            executionChunks[i+1] = chunk
+        end
+        local opcode = cpu.decoder.opcodeBus
+        local destination = cpu.decoder.destinationBus
+        cpu.instructions[opcode](destination, executionChunks)
 
         -- Increment the program counter
         cpu.miscMemory.programCounter = cpu.miscMemory.programCounter + 1
 
-        cpu.clock = false -- Cycle the clock to simulate the low part of the clock cycle and simulate DDRAM access
-
-        -- Write
-        Hardware.ram.write()
+        cpu.clock = false -- Cycle the clock to false
     end
 
 end
