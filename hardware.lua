@@ -2,13 +2,10 @@ local Hardware = {}
 local bit = require("bit")
 
 -- load the tape.txt file
-local tapeFile = "tape.txt"
+local tapeFile = "storage.txt"
 local tapeHandle = io.open(tapeFile, "r")
 if not tapeHandle then
     error("Could not open tape file: " .. tapeFile)
-end
-for address, value in tapeHandle:lines() do
-    Hardware.mem[address] = value
 end
 tapeHandle:close()
 
@@ -43,9 +40,19 @@ Hardware.bus = {
 Hardware.mem = {}
 
 local function formatMem()
-    for i = 0, 0xFF do 
-        Hardware.mem[i] = 0x0000
+    local romSrc = "assemblerOutput/rom.hex"
+    local romFile = assert(io.open(romSrc, "r"), "Could not open ROM file")
+    for addr = 0, 0xFF do
+        local line = romFile:read("*l")
+        if not line then break end        -- stop if fewer than 256 lines
+        -- strip any leading/trailing whitespace
+        line = line:match("^%s*(.-)%s*$")
+        -- parse "0xWWWW" into a number
+        local value = tonumber(line, 16)
+        assert(value, "Invalid hex on line "..addr)
+        Hardware.mem[addr] = value
     end
+    romFile:close()
     for i = 0x0100, 0xFFFF do
         Hardware.mem[i] = 0x0000
     end
@@ -120,149 +127,140 @@ do
 
     cpu.registers = {}
     for i = 0, 0xF do cpu.registers[i] = 0x0000 end
+    -- register 0x0 is the zero register, always 0x0000
+    -- register 0x1 is the link register
 
+    -- Updated decoder:
     cpu.decoder = {
-        twoCycleOpcodes = {
-            [0x1] = true, [0x2] = true, [0x3] = true
-        },
-        pendingFetch = false,
-        overflowRegister = 0x0000,
-        opcodeBus = 0x0,
-        destinationBus = 0x0,
-        contentBus = 0x000000,
+        twoCycleOpcodes = { [0x1]=true, [0x2]=true, [0x3]=true },
+        pendingFetch    = false,
+        opcodeBus       = 0x0,
+        destinationBus  = 0x0,
+        rnBus           = 0x0,
+        rmBus           = 0x0,
+        contentBus      = 0x0000,
 
         decode = function()
             local raw = Hardware.bus.data
+
             if not cpu.decoder.pendingFetch then
-                local top = bit.rshift(raw, 12)
-                local dest = bit.band(bit.rshift(raw, 8), 0xF)
-                cpu.decoder.opcodeBus = top
-                cpu.decoder.destinationBus = dest
-                if cpu.decoder.twoCycleOpcodes[top] then -- if this is a two-cycle opcode -> then we want to populate the overflow register with the raw data
-                    -- Case: two-cycle opcode, we need to wait for the next cycle to fetch the rest of the data so we populate the overflow register
+                -- Phase 1: extract fields from W1
+                local op = bit.rshift(raw, 12)
+                local rd = bit.band(bit.rshift(raw,  8), 0xF)
+                local rn = bit.band(bit.rshift(raw,  4), 0xF)
+                local rm = bit.band(raw,               0xF)
+
+                cpu.decoder.opcodeBus      = op
+                cpu.decoder.destinationBus = rd
+                cpu.decoder.rnBus          = rn
+                cpu.decoder.rmBus          = rm
+
+                if cpu.decoder.twoCycleOpcodes[op] then
+                    -- stall to fetch W2
                     cpu.decoder.pendingFetch = true
-                    cpu.decoder.overflowRegister = raw
                     cpu.clock = false
                     return
                 end
-                -- Case: single-cycle opcode with no overflow in the register
-                cpu.decoder.contentBus = 0x000000 -- reset content bus
-                cpu.decoder.contentBus = bit.band(raw, 0xFFFF) -- drop the 16bit overflow into the lower half of the content bus
+
+                -- single-cycle: no W2, so contentBus = 0
+                cpu.decoder.contentBus = 0x0000
                 return
             end
-            -- Case: two-cycle opcode, and the overflow register is populated, so we know we can go ahead and decode the instruction
-            cpu.decoder.contentBus = 0x000000 -- reset content bus
-            local ext = Hardware.bus.data
-            local first = cpu.decoder.overflowRegister
-            local low = bit.band(first, 0xFF)
-            cpu.decoder.opcodeBus = bit.rshift(first, 12)
-            cpu.decoder.destinationBus = bit.band(bit.rshift(first, 8), 0xF)
-            cpu.decoder.contentBus = bit.bor(bit.lshift(low, 16), bit.band(ext, 0xFFFF))
+
+            -- Phase 2: second word arrived, that is the 16-bit payload
+            cpu.decoder.contentBus   = bit.band(Hardware.bus.data, 0xFFFF)
             cpu.decoder.pendingFetch = false
-        end
+        end,
+
+        execute = function()
+            local op      = cpu.decoder.opcodeBus
+            local rd      = cpu.decoder.destinationBus
+            local rn      = cpu.decoder.rnBus
+            local rm      = cpu.decoder.rmBus
+            local payload = cpu.decoder.contentBus
+
+            cpu.instructions[op](rd, rn, rm, payload)
+        end,
     }
 
-    local function combineNibbles(args, start, count)
-        local v = 0
-        for i = 0, count - 1 do
-            v = bit.bor(v, bit.lshift(args[start + i], i * 4))
-        end
-        return v
-    end
-
+    -- Updated instruction implementations:
     cpu.instructions = {
-        [0x0] = function(rd, args) end, -- NOP (No Operation)
-
-        [0x1] = function(rd, args) -- LOAD
-            local addr = combineNibbles(args, 1, 6)
-            Hardware.bus.writeLine = false
-            Hardware.bus.address = addr
-            Hardware.mem.read()
-            Hardware.cpu.registers[rd] = Hardware.bus.data
-            Hardware.bus.data = 0
-            Hardware.bus.address = 0
+        [0x0] = function(rd, rn, rm, payload) 
+            -- NOP
         end,
 
-        [0x2] = function(rd, args) -- STORE
-            local addr = combineNibbles(args, 1, 6)
+        [0x1] = function(rd, rn, rm, payload)  -- LOAD
+            Hardware.bus.writeLine = false
+            Hardware.bus.address   = payload
+            Hardware.mem.read()
+            cpu.registers[rd]      = Hardware.bus.data
+            Hardware.bus.address   = 0
+        end,
+
+        [0x2] = function(rd, rn, rm, payload)  -- STORE
             Hardware.bus.writeLine = true
-            Hardware.bus.address = addr
-            Hardware.bus.data = Hardware.cpu.registers[rd]
+            Hardware.bus.address   = payload
+            Hardware.bus.data      = cpu.registers[rd]
             Hardware.mem.write()
             Hardware.bus.writeLine = false
-            Hardware.bus.data = 0
-            Hardware.bus.address = 0
+            Hardware.bus.data      = 0
+            Hardware.bus.address   = 0
         end,
 
-        [0x3] = function(rd, args) -- ADDI (Add Immediate)
-            local rn = args[1]
-            local imm = combineNibbles(args, 2, 5)
-            Hardware.cpu.registers[rd] = Hardware.cpu.registers[rn] + imm
+        [0x3] = function(rd, rn, rm, payload)  -- ADDI
+            cpu.registers[rd] = cpu.registers[rn] + payload
         end,
 
-        [0x4] = function(rd, args) -- ADDR (Add Register)
-            local rn = args[2]
-            local rm = args[1]
-            Hardware.cpu.registers[rd] = Hardware.cpu.registers[rn] + Hardware.cpu.registers[rm]
+        [0x4] = function(rd, rn, rm, payload)  -- ADDR
+            cpu.registers[rd] = cpu.registers[rn] + cpu.registers[rm]
         end,
 
-        [0x5] = function(rd, args) -- SUBR (Subtract Register)
-            local rn = args[2]
-            local rm = args[1]
-            local res = Hardware.cpu.registers[rn] - Hardware.cpu.registers[rm]
-            cpu.miscMemory.flagWasZero = (res == 0)
+        [0x5] = function(rd, rn, rm, payload)  -- SUBR
+            local res = cpu.registers[rn] - cpu.registers[rm]
+            cpu.miscMemory.flagWasZero     = (res == 0)
             cpu.miscMemory.flagWasNegative = (res < 0)
-            Hardware.cpu.registers[rd] = res
+            cpu.registers[rd]              = res
         end,
 
-        [0x6] = function(_, args) -- JMP (Jump)
+        [0x6] = function(rd, rn, rm, payload)  -- JMP
             cpu.miscMemory.shouldAdvancePC = false
-            -- addr is the value of the register at args[1] (the first word)
-            local addr = cpu.registers[args[1]]
-            cpu.miscMemory.programCounter = addr
-            Hardware.cpu.registers[0x1] = addr
+            cpu.miscMemory.programCounter  = cpu.registers[rd]
+            cpu.registers[0x1]             = cpu.registers[rd]  -- link register
         end,
 
-        [0x7] = function(_, args) -- JMPZ (Jump if Zero)
+        [0x7] = function(rd, rn, rm, payload)  -- JMPZ
             if cpu.miscMemory.flagWasZero then
                 cpu.miscMemory.shouldAdvancePC = false
-                -- addr is the value of the register at args[1] (the first word)
-                local addr = cpu.registers[args[1]]
-                cpu.miscMemory.programCounter = addr
+                cpu.miscMemory.programCounter  = cpu.registers[rd]
             end
         end,
 
-        [0x8] = function(_, args) -- JMPN (Jump if Negative)
+        [0x8] = function(rd, rn, rm, payload)  -- JMPN
             if cpu.miscMemory.flagWasNegative then
                 cpu.miscMemory.shouldAdvancePC = false
-                -- addr is the value of the register at args[1] (the first word)
-                local addr = cpu.registers[args[1]]
-                cpu.miscMemory.programCounter = addr
+                cpu.miscMemory.programCounter  = cpu.registers[rd]
             end
         end,
 
-        [0x9] = function(rd, args) -- NAND (Bitwise NAND)
-            local rn = args[2]
-            local rm = args[1]
-            Hardware.cpu.registers[rd] =
-                bit.bnot(bit.band(Hardware.cpu.registers[rn], Hardware.cpu.registers[rm]))
+        [0x9] = function(rd, rn, rm, payload)  -- NAND
+            cpu.registers[rd] = bit.bnot(
+                bit.band(cpu.registers[rn], cpu.registers[rm])
+            )
         end,
 
-        [0xA] = function(rd, args) -- SHIFTL (Shift Left)
-            local rn = args[2]
-            Hardware.cpu.registers[rd] = bit.lshift(Hardware.cpu.registers[rn], 1)
+        [0xA] = function(rd, rn, rm, payload)  -- SHIFTL
+            cpu.registers[rd] = bit.lshift(cpu.registers[rn], 1)
         end,
 
-        [0xB] = function(rd, args) -- SHIFTR (Shift Right)
-            local rn = args[2]
-            Hardware.cpu.registers[rd] = bit.rshift(Hardware.cpu.registers[rn], 1)
-        end
+        [0xB] = function(rd, rn, rm, payload)  -- SHIFTR
+            cpu.registers[rd] = bit.rshift(cpu.registers[rn], 1)
+        end,
     }
 
     cpu.clock = true
 
     function cpu.cycle(displayFunction)
-        --os.exit(0) -- ensure we are running in a luajit instance
+        --os.exit(0) -- exit ripple if this is uncommented - will not launch again until commented out
         local filesToCheck = {
             "hardware.lua",
             "main.lua",

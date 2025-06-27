@@ -8,72 +8,15 @@ end
 -- disabled garbage collection to try and fail to avoid performance issues
 --collectgarbage("stop")
 local term = require "term"
-local socket = require "socket"
 local Hardware = require "hardware"
 
 local phaseHistory = {}
-local hangTime = 0.1 -- seconds to hang after displaying each phase
+local hangTime = 1 -- seconds to hang after displaying each phase
 
 local cycles = 0
 local startTime = 0
 
-local ffi = require "ffi"
-local sleep, jit_time
-
-local total_sleep_time = 0
-
-if jit.os == "Windows" then
-    ffi.cdef [[
-    typedef long long LARGE_INTEGER;
-    int QueryPerformanceCounter(LARGE_INTEGER *lpPerformanceCount);
-    int QueryPerformanceFrequency(LARGE_INTEGER *lpFrequency);
-    void Sleep(unsigned long ms);
-  ]]
-
-    local freq_ptr = ffi.new("LARGE_INTEGER[1]")
-    assert(ffi.C.QueryPerformanceFrequency(freq_ptr) ~= 0, "QueryPerformanceFrequency failed")
-    local freq = tonumber(freq_ptr[0])
-    local counter_ptr = ffi.new("LARGE_INTEGER[1]")
-
-    jit_time = function()
-        ffi.C.QueryPerformanceCounter(counter_ptr)
-        return tonumber(counter_ptr[0]) / freq
-    end
-
-    sleep = function(sec)
-        ffi.C.Sleep(sec * 1000)
-        total_sleep_time = total_sleep_time + sec
-    end
-
-else
-    ffi.cdef [[
-    struct timespec { long tv_sec; long tv_nsec; };
-    int clock_gettime(int clk_id, struct timespec *tp);
-    int nanosleep(const struct timespec *req, struct timespec *rem);
-  ]]
-    local CLOCK_MONOTONIC = 1
-    local ts = ffi.new("struct timespec[1]")
-
-    jit_time = function()
-        ffi.C.clock_gettime(CLOCK_MONOTONIC, ts)
-        return tonumber(ts[0].tv_sec) + tonumber(ts[0].tv_nsec) * 1e-9
-    end
-
-    sleep = function(sec)
-        local s = math.floor(sec)
-        ts[0].tv_sec = s
-        ts[0].tv_nsec = (sec - s) * 1e9
-        ffi.C.nanosleep(ts, nil)
-        total_sleep_time = total_sleep_time + sec
-    end
-end
-
-get_total_sleep_time = function()
-    return total_sleep_time
-end
-
-JIT_TIME = jit_time
-SLEEP = sleep
+require "ffilib" -- load the FFI library for sleep and time functions
 
 local function emptyFunction(phase)
     -- This function is used when headless mode is enabled
@@ -82,17 +25,49 @@ end
 
 local hertz = 0
 local rollingHertz = 0
-local resetTime = jit_time()
+local resetTime = JIT_TIME()
 local thisExecTime = 0
 local thisDisplayTime = 0
 local displayTimes = {}
 
+
+-- Opcode values
+local opcodes = {
+    NOP    = 0x0,
+    LOAD   = 0x1,
+    STORE  = 0x2,
+    ADDI   = 0x3,
+    ADDR   = 0x4,
+    SUBR   = 0x5,
+    JMP    = 0x6,
+    JMPZ   = 0x7,
+    JMPN   = 0x8,
+    NAND   = 0x9,
+    SHIFTL = 0xA,
+    SHIFTR = 0xB,
+}
+
+local opCodeToInstruction = {
+    [0x0] = "NOP",
+    [0x1] = "LOAD",
+    [0x2] = "STORE",
+    [0x3] = "ADDI",
+    [0x4] = "ADDR",
+    [0x5] = "SUBR",
+    [0x6] = "JMP",
+    [0x7] = "JMPZ",
+    [0x8] = "JMPN",
+    [0x9] = "NAND",
+    [0xA] = "SHIFTL",
+    [0xB] = "SHIFTR",
+}
+
 local function display(phase)
-    local now = jit_time()
+    local now = JIT_TIME()
     local uptime = now - resetTime
 
-    local totalSleepTime = get_total_sleep_time()
-    local sleepTimeSinceLast = totalSleepTime - (phaseHistory[2] and phaseHistory[2].sleepTimeSoFar or 0)
+    local totalSleepTime = GET_TOTAL_SLEEP_TIME()
+    local sleepTimeSinceLast = (totalSleepTime - (phaseHistory[2] and phaseHistory[2].sleepTimeSoFar or 0)) * 1000
 
     -- record this phase
     table.insert(phaseHistory, 1, {
@@ -107,7 +82,7 @@ local function display(phase)
     -- handle reset
     if phase == "Resetting CPU..." then
         cycles = 0
-        resetTime = jit_time()
+        resetTime = JIT_TIME()
     end
 
     -- recalc hertz on “Top of cycle” only
@@ -163,16 +138,33 @@ local function display(phase)
     -- memory usage
     term.line("")
     term.line(term.padLeft("Memory", 2))
-    term.line("  RAM In use: " .. (Hardware.mem.addressesUsed * 2) .. " bytes")
+    term.line("RAM In use: " .. (Hardware.mem.addressesUsed * 2) .. " bytes")
+    
+    -- decoder state
+    term.line("")
+    term.line(term.padLeft("Decoder", 2))
+    local decoder = Hardware.cpu.decoder
+    term.line("Current Opcode: 0x" .. string.format("%X", decoder.opcodeBus) .. " (" .. opCodeToInstruction[decoder.opcodeBus] .. ")")
+    -- destination is 4 nibbles, so we can display it as a hex value with 4 digits
+    term.line("Current Destination: 0x" .. string.format("%04X", decoder.destinationBus))
+    term.line("Current Rn: 0x" .. string.format("%X", decoder.rnBus)) 
+    term.line("Current Rm: 0x" .. string.format("%X", decoder.rmBus))
+    term.line("Content Bus: 0x" .. string.format("%04X", decoder.contentBus))
+    term.line("Pending Fetch: " .. tostring(decoder.pendingFetch))
 
     -- misc CPU state
     term.line("")
     term.line(term.padLeft("Misc Memory", 2))
     local mm = Hardware.cpu.miscMemory
-    term.line("  PC           : 0x" .. string.format("%04X", mm.programCounter))
-    term.line("  Flag Zero    : " .. tostring(mm.flagWasZero))
-    term.line("  Flag Negative: " .. tostring(mm.flagWasNegative))
-    term.line("  Advance PC   : " .. tostring(mm.shouldAdvancePC))
+    term.line("PC           : 0x" .. string.format("%04X", mm.programCounter))
+    local valueAtPC = Hardware.mem[mm.programCounter]
+    if not valueAtPC then
+        valueAtPC = 0
+    end
+    term.line("Memory At PC : 0x" .. string.format("%04X", valueAtPC))
+    term.line("Flag Zero    : " .. tostring(mm.flagWasZero))
+    term.line("Flag Negative: " .. tostring(mm.flagWasNegative))
+    term.line("Advance PC   : " .. tostring(mm.shouldAdvancePC))
     term.line("")
 
     -- phase history log
@@ -202,7 +194,7 @@ local function display(phase)
 
     term.render()
 
-    thisDisplayTime = jit_time() - now
+    thisDisplayTime = JIT_TIME() - now
     table.insert(displayTimes, thisDisplayTime)
 end
 
@@ -210,21 +202,21 @@ local nextTime = 0
 
 local function benchmarkedDisplay(phase)
     -- benchmark the display function and error out if it takes longer than 10ms to run
-    local start = jit_time()
+    local start = JIT_TIME()
     local ok, err = pcall(display, phase)
     if not ok then
         error("Display function failed: " .. tostring(err))
     end
-    local elapsed = jit_time() - start
+    local elapsed = JIT_TIME() - start
     if elapsed > 0.05 then
         error(string.format("Display function took too long to execute: %.3f seconds", elapsed))
     end
     -- hang for a short time to simulate the CPU clock speed
     nextTime = nextTime + hangTime
-    local now = jit_time()
+    local now = JIT_TIME()
     local sleepTime = nextTime - now
     if sleepTime > 0 then
-        sleep(sleepTime)
+        SLEEP(sleepTime)
     else
         nextTime = now
     end
@@ -233,7 +225,7 @@ end
 
 Hardware.bus.resetLine = true
 
-local programStart = jit_time()
+local programStart = JIT_TIME()
 cycles = 0
 
 rollingHertz = 0
@@ -241,13 +233,13 @@ rollingHertz = 0
 local ok, err = pcall(function()
     print("Starting CPU cycles...")
     while true do
-        startTime = jit_time()
+        startTime = JIT_TIME()
         if headless then
             Hardware.cpu.cycle(emptyFunction)
         else
             Hardware.cpu.cycle(benchmarkedDisplay)
         end
-        thisExecTime = (jit_time() - startTime) * 1000 -- in milliseconds
+        thisExecTime = (JIT_TIME() - startTime) * 1000 -- in milliseconds
         rollingHertz = (rollingHertz * 0.95) + (1 / thisExecTime * 0.05) -- rolling average
         cycles = cycles + 1
     end
@@ -257,7 +249,7 @@ print("An error occurred during execution...")
 
 if not ok then
     print("An error occurred during execution...")
-    local crashTime = jit_time()
+    local crashTime = JIT_TIME()
     local uptime = crashTime - programStart
     benchmarkedDisplay("Crashing...")
     term.printBenchmarks()

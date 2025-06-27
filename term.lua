@@ -2,7 +2,8 @@ local term = {}
 local buf = {}
 local rows, cols = 0, 0
 
-local socket = require "socket"
+require "ffilib" -- load the FFI library for sleep and time functions
+
 local benchmarks = {} -- store count and total time for each function
 
 local function now()
