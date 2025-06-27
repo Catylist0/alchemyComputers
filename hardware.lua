@@ -1,22 +1,54 @@
 local Hardware = {}
 local bit = require("bit")
 
+-- Cross-platform file mtime check (replaces lfs)
+local function get_mtime(file)
+    if jit.os == "Windows" then
+        local cmd = 'powershell -Command "(Get-Item \'' .. file .. '\').LastWriteTimeUtc.ToFileTimeUtc()"'
+        local handle = io.popen(cmd)
+        if not handle then
+            return nil
+        end
+        local output = handle:read("*a")
+        handle:close()
+        local fileTime = tonumber(output)
+        if not fileTime then
+            return nil
+        end
+        return fileTime / 10000000 - 11644473600
+    else
+        local handle = io.popen("stat -c %Y " .. file)
+        if not handle then
+            return nil
+        end
+        local result = handle:read("*a")
+        handle:close()
+        return tonumber(result)
+    end
+end
+
 Hardware.bus = {
-    data = 0x0000, -- data bus
-    address = 0x0000, -- address bus
-    writeLine = false, -- boolean flag indicating if the bus is in a read cycle
-    resetLine = false, -- boolean flag indicating if the reset line is active
-    clock = true, -- boolean flag indicating if the clock is high
+    data = 0x0000,
+    address = 0x0000,
+    writeLine = false,
+    resetLine = false,
+    clock = true
 }
 
 Hardware.mem = {}
 
-function formatMem()
-    for i = 0x0100, 0xFFFF do -- the first 256 bytes are reserved for the ROM firmware
-        Hardware.mem[i] = 0x0000 -- Initialize mem with zeroes
+local function formatMem()
+    for i = 0, 0xFF do
+        Hardware.mem[i] = 0x0000
     end
-    Hardware.mem[0x0000] = 0x0000 -- Initialize the first byte to nop (Temporary)
+    for i = 0x0100, 0xFFFF do
+        Hardware.mem[i] = 0x0000
+    end
+    Hardware.mem[0x0000] = 0x0000
 end
+
+local ramUseMatrix = {}
+Hardware.mem.addressesUsed = 0x0000
 
 do
     local mem = Hardware.mem
@@ -24,7 +56,7 @@ do
     function mem.read()
         if Hardware.bus.writeLine then
             return nil
-        end -- If the bus is in a write cycle, do nothing
+        end
         local address = Hardware.bus.address
         local value = mem[address]
         Hardware.bus.data = value
@@ -33,10 +65,19 @@ do
     function mem.write()
         if not Hardware.bus.writeLine then
             return nil
-        end -- If the bus is not in a write cycle, do nothing
+        end
         local address = Hardware.bus.address
         local value = Hardware.bus.data
         mem[address] = value
+        if not release then
+            if not ramUseMatrix[address] then
+                ramUseMatrix[address] = true
+                Hardware.mem.addressesUsed = Hardware.mem.addressesUsed + 1
+            end
+        else
+            ramUseMatrix[address] = nil
+            Hardware.mem.addressesUsed = Hardware.mem.addressesUsed - 1
+        end
     end
 end
 
@@ -45,77 +86,72 @@ do
     local cpu = Hardware.cpu
 
     cpu.miscMemory = {
-        programCounter = 0x0000, -- holds the address of the next instruction to execute
-        flagWasNegative = false, -- boolean flag indicating if the last instruction resulted in a negative value
-        flagWasZero = false, -- boolean flag indicating if the last instruction resulted in a zero value
-        shouldAdvancePC = false -- boolean flag indicating if the program counter should not be advanced
+        programCounter = 0x0000,
+        flagWasNegative = false,
+        flagWasZero = false,
+        shouldAdvancePC = false
     }
 
-    cpu.registers = {
-        [0x0] = 0x0000, -- r0: reserved for zero value. Writing to this register does nothing and is a form of nop.
-        [0x1] = 0x0000, -- r1: link register
-        [0x2] = 0x0000, -- r2: first free register
-        [0x3] = 0x0000,
-        [0x4] = 0x0000,
-        [0x5] = 0x0000,
-        [0x6] = 0x0000,
-        [0x7] = 0x0000,
-        [0x8] = 0x0000,
-        [0x9] = 0x0000,
-        [0xA] = 0x0000,
-        [0xB] = 0x0000,
-        [0xC] = 0x0000,
-        [0xD] = 0x0000,
-        [0xE] = 0x0000,
-        [0xF] = 0x0000
-    }
+    cpu.registers = {}
+    for i = 0, 0xF do
+        cpu.registers[i] = 0x0000
+    end
 
     cpu.decoder = {
         twoCycleOpcodes = {
-            [0x1] = true, -- LOAD   (24-bit)
-            [0x2] = true, -- STORE  (24-bit)
-            [0x3] = true, -- ADDI   (28-bit)
-            [0x6] = true, -- JMP    (20-bit)
-            [0x7] = true, -- JMPZ   (20-bit)
-            [0x8] = true -- JMPN   (20-bit)
+            [0x1] = true,
+            [0x2] = true,
+            [0x3] = true,
+            [0x6] = true,
+            [0x7] = true,
+            [0x8] = true
         },
         pendingFetch = false,
-        overflowRegister = 0x0000, -- holds entire first 16-bit fetch
+        overflowRegister = 0x0000,
         opcodeBus = 0x0,
         destinationBus = 0x0,
         contentBus = 0x000000,
 
         decode = function()
-            local raw = Hardware.bus.data -- first 16 bits
-
+            local raw = Hardware.bus.data
             if not cpu.decoder.pendingFetch then
+                -- Phase 1: initial decode
                 local top = bit.rshift(raw, 12)
                 local dest = bit.band(bit.rshift(raw, 8), 0xF)
-
                 cpu.decoder.opcodeBus = top
                 cpu.decoder.destinationBus = dest
 
                 if cpu.decoder.twoCycleOpcodes[top] then
+                    -- needs extra word
                     cpu.decoder.pendingFetch = true
                     cpu.decoder.overflowRegister = raw
                     cpu.clock = false
                     return
                 end
 
-                cpu.decoder.contentBus = bit.band(raw, 0xFF)
+                -- single-cycle: zero-pad to 24 bits
+                cpu.decoder.contentBus = bit.lshift(raw, 8)
                 return
             end
 
-            -- second half
-            local ext = Hardware.bus.data
+            -- Phase 2: extended fetch
+            local ext = bit.band(Hardware.bus.data, 0xFFFF)
             local first = cpu.decoder.overflowRegister
-            local low = bit.band(first, 0xFF)
+            local top = bit.rshift(first, 12)
+            local dest = bit.band(bit.rshift(first, 8), 0xF)
 
-            cpu.decoder.opcodeBus = bit.rshift(first, 12)
-            cpu.decoder.destinationBus = bit.band(bit.rshift(first, 8), 0xF)
-            cpu.decoder.contentBus = bit.bor(bit.lshift(low, 16), bit.band(ext, 0xFFFF))
+            cpu.decoder.opcodeBus = top
+            cpu.decoder.destinationBus = dest
+
+            -- assemble 24 bits: [ first.low8 ][ ext.high8 ][ ext.low8 ]
+            local low = bit.band(first, 0xFF)
+            cpu.decoder.contentBus = bit.bor(bit.lshift(low, 16), ext)
 
             cpu.decoder.pendingFetch = false
+        end,
+
+        execute = function()
+            operations[cpu.decoder.opcodeBus](cpu.decoder.destinationBus, cpu.decoder.contentBus)
         end
     }
 
@@ -129,168 +165,156 @@ do
 
     cpu.instructions = {
         [0x0] = function(rd, args)
-            -- NOP: nothing
         end,
 
         [0x1] = function(rd, args)
-            -- LOAD Rd, addr24
-            local addr = combineNibbles(args, 1, 6)  -- use args[1..6]
+            local addr = combineNibbles(args, 1, 6)
             Hardware.bus.writeLine = false
-            Hardware.bus.address   = addr
+            Hardware.bus.address = addr
             Hardware.mem.read()
             Hardware.cpu.registers[rd] = Hardware.bus.data
-            Hardware.bus.data    = 0
+            Hardware.bus.data = 0
             Hardware.bus.address = 0
         end,
 
         [0x2] = function(rd, args)
-            -- STORE Rd, addr24
             local addr = combineNibbles(args, 1, 6)
             Hardware.bus.writeLine = true
-            Hardware.bus.address   = addr
-            Hardware.bus.data      = Hardware.cpu.registers[rd]
+            Hardware.bus.address = addr
+            Hardware.bus.data = Hardware.cpu.registers[rd]
             Hardware.mem.write()
             Hardware.bus.writeLine = false
-            Hardware.bus.data      = 0
-            Hardware.bus.address   = 0
+            Hardware.bus.data = 0
+            Hardware.bus.address = 0
         end,
 
         [0x3] = function(rd, args)
-            -- ADDI Rd, Rn, imm20
-            local rn  = args[1]
-            local imm = combineNibbles(args, 2, 5)  -- args[2..6]
+            local rn = args[1]
+            local imm = combineNibbles(args, 2, 5)
             Hardware.cpu.registers[rd] = Hardware.cpu.registers[rn] + imm
         end,
 
         [0x4] = function(rd, args)
-            -- ADDR Rd, Rn, Rm
             local rn = args[2]
             local rm = args[1]
             Hardware.cpu.registers[rd] = Hardware.cpu.registers[rn] + Hardware.cpu.registers[rm]
         end,
 
         [0x5] = function(rd, args)
-            -- SUBR Rd, Rn, Rm
-            local rn  = args[2]
-            local rm  = args[1]
+            local rn = args[2]
+            local rm = args[1]
             local res = Hardware.cpu.registers[rn] - Hardware.cpu.registers[rm]
-            Hardware.cpu.miscMemory.flagWasZero     = (res == 0)
-            Hardware.cpu.miscMemory.flagWasNegative = (res < 0)
-            Hardware.cpu.registers[rd]              = res
+            cpu.miscMemory.flagWasZero = (res == 0)
+            cpu.miscMemory.flagWasNegative = (res < 0)
+            Hardware.cpu.registers[rd] = res
         end,
 
-        [0x6] = function(rd, args)
-            -- JMP addr20
-            Hardware.cpu.miscMemory.shouldAdvancePC = false
-            local addr = combineNibbles(args, 1, 5)  -- args[1..5]
-            Hardware.cpu.miscMemory.programCounter = addr
+        [0x6] = function(_, args)
+            cpu.miscMemory.shouldAdvancePC = false
+            local addr = combineNibbles(args, 1, 5)
+            cpu.miscMemory.programCounter = addr
             Hardware.cpu.registers[0x1] = addr
         end,
 
-        [0x7] = function(rd, args)
-            -- JMPZ addr20
-            Hardware.cpu.miscMemory.shouldAdvancePC = false
+        [0x7] = function(_, args)
+            cpu.miscMemory.shouldAdvancePC = false
             local addr = combineNibbles(args, 1, 5)
-            if Hardware.cpu.miscMemory.flagWasZero then
-                Hardware.cpu.miscMemory.programCounter = addr
+            if cpu.miscMemory.flagWasZero then
+                cpu.miscMemory.programCounter = addr
             end
         end,
 
-        [0x8] = function(rd, args)
-            -- JMPN addr20
-            Hardware.cpu.miscMemory.shouldAdvancePC = false
+        [0x8] = function(_, args)
+            cpu.miscMemory.shouldAdvancePC = false
             local addr = combineNibbles(args, 1, 5)
-            if Hardware.cpu.miscMemory.flagWasNegative then
-                Hardware.cpu.miscMemory.programCounter = addr
+            if cpu.miscMemory.flagWasNegative then
+                cpu.miscMemory.programCounter = addr
             end
         end,
 
         [0x9] = function(rd, args)
-            -- NAND Rd, Rn, Rm
             local rn = args[2]
             local rm = args[1]
-            Hardware.cpu.registers[rd] =
-                bit.bnot(bit.band(Hardware.cpu.registers[rn], Hardware.cpu.registers[rm]))
+            Hardware.cpu.registers[rd] = bit.bnot(bit.band(Hardware.cpu.registers[rn], Hardware.cpu.registers[rm]))
         end,
 
         [0xA] = function(rd, args)
-            -- SHIFTL Rd, Rn
             local rn = args[2]
             Hardware.cpu.registers[rd] = bit.lshift(Hardware.cpu.registers[rn], 1)
         end,
 
         [0xB] = function(rd, args)
-            -- SHIFTR Rd, Rn
             local rn = args[2]
             Hardware.cpu.registers[rd] = bit.rshift(Hardware.cpu.registers[rn], 1)
-        end,
+        end
     }
-
 
     cpu.clock = true
 
     function cpu.cycle(displayFunction)
-        if not displayFunction then
-            print("No display function provided, using default no-op.")
-            displayFunction = function() end -- Default to a no-op if no display function is provided
+        os.exit(0) -- ensure we are running in a luajit instance
+        local filesToCheck = {"hardware.lua", "main.lua", "ide.lua", "debug.lua", "term.lua"}
+        for _, file in ipairs(filesToCheck) do
+            local mtime = get_mtime(file)
+            if mtime and os.time() - mtime < 1 then
+                displayFunction("Detected changes in " .. file .. ", restarting the luajit instance...")
+                -- start a new luajit instance of this software and block the thread with It
+                local file = "debug.lua"
+                os.execute("luajit " .. file)
+                os.exit(0)
+            end
         end
+
+        assert(type(displayFunction) == "function", "Display function must be a function")
+
         cpu.clock = true
+
         if Hardware.bus.resetLine then
             displayFunction("Resetting CPU...")
-            formatMem() -- Reset memory
+            formatMem()
             cpu.miscMemory.programCounter = 0x0000
             cpu.miscMemory.flagWasNegative = false
             cpu.miscMemory.flagWasZero = false
-            cpu.miscMemory.shouldAdvancePC = true -- Reset the flag to allow PC to advance
+            cpu.miscMemory.shouldAdvancePC = true
             cpu.decoder.overflowRegister = 0x0000
             cpu.decoder.pendingFetch = false
             for i = 0, 15 do
-                cpu.registers[i] = 0x0000 -- Reset all registers to zero
+                cpu.registers[i] = 0x0000
             end
-            cpu.miscMemory.resetLine = false -- Reset the reset line
+            Hardware.bus.resetLine = false
         end
 
         displayFunction("Top of cycle: Fetching...")
-
-        -- Fetch
-        Hardware.bus.writeLine = false -- Set the bus to read mode
-        Hardware.bus.address = cpu.miscMemory.programCounter -- Set the address to the program counter
-        Hardware.mem.read() -- Read the instruction from mem
+        Hardware.bus.writeLine = false
+        Hardware.bus.address = cpu.miscMemory.programCounter
+        Hardware.mem.read()
 
         displayFunction("Fetched instructions: Decoding...")
-
-        -- Decode
         cpu.decoder.decode()
 
-        
         if not cpu.clock then
-            -- If the clock is low, we need to wait for the next cycle as we have stalled
-            displayFunction("Hanging in the decode phase, waiting for the next cycle...")
+            displayFunction("Hanging in the decode for next cycle...")
             return
         end
-        
-        displayFunction("Decoded instruction: Executing...")
 
-        -- Execute
+        displayFunction("Decoded instruction: Executing...")
         local cb = cpu.decoder.contentBus
         local args = {}
-        for i=0,5 do
-            args[i+1] = bit.band(bit.rshift(cb, i*4), 0xF)
+        for i = 0, 5 do
+            args[i + 1] = bit.band(bit.rshift(cb, i * 4), 0xF) -- pull out nibbles (4 bits 16 decimal each)
         end
 
         local opc = cpu.decoder.opcodeBus
-        local rd  = cpu.decoder.destinationBus
+        local rd = cpu.decoder.destinationBus
         cpu.instructions[opc](rd, args)
-        
-        displayFunction("Executed instruction: beginning next cycle...")
-        
-        -- Increment the program counter
-        if cpu.miscMemory.shouldAdvancePC then cpu.miscMemory.programCounter = cpu.miscMemory.programCounter + 1 end
-        cpu.miscMemory.shouldAdvancePC = true -- Reset the flag for the next cycle
 
-        cpu.clock = false -- Cycle the clock to false
+        displayFunction("Instruction Executed: Incrementing Program Counter...")
+        if cpu.miscMemory.shouldAdvancePC then
+            cpu.miscMemory.programCounter = cpu.miscMemory.programCounter + 1
+        end
+        cpu.miscMemory.shouldAdvancePC = true
+        cpu.clock = false
     end
-
 end
 
 return Hardware

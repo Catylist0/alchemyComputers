@@ -1,96 +1,262 @@
 local version = "0.0.1"
-
-local function getTerminalSize()
-    local handle = io.popen("stty size", "r")
-    local output = handle:read("*l")
-    handle:close()
-    local r, c = output:match("^(%d+)%s+(%d+)$")
-    return tonumber(r), tonumber(c)
+-- Set to true to run without terminal display
+local headless = true
+if DebugMode then
+    headless = false
 end
-
-local rows, cols = getTerminalSize()
-
--- Clear screen and move cursor to bottom-left
-io.write("\27[2J", string.format("\27[%d;1H", rows))
-
+-- disabled garbage collection to try and fail to avoid performance issues
+--collectgarbage("stop")
+local term = require "term"
+local socket = require "socket"
 local Hardware = require "hardware"
-local buf = {}
-
-local function renderLine(n, txt)
-    buf[n] = txt
-end
-
-local function flush()
-    io.write("\27[2J")
-    for i = 1, rows do
-        io.write(("\27[%d;1H%s"):format(i, buf[i] or ""))
-    end
-    io.write(("\27[%d;1H"):format(rows))
-end
 
 local phaseHistory = {}
+local hangTime = 0.1 -- seconds to hang after displaying each phase
 
-local function displayFunction(phase)
-    rows, cols = getTerminalSize()
-    table.insert(phaseHistory, phase)
-    buf = {}
+local cycles = 0
+local startTime = 0
 
-    -- Header
-    renderLine(1, "Hardware Emulator Version " .. version)
-    renderLine(2, "Phase: " .. phase)
+local ffi = require "ffi"
+local sleep, jit_time
 
-    -- Registers
-    renderLine(3, "Registers:")
-    do
-        local rn = 0
-        for row = 1, 4 do
-            local colsTbl = {}
-            for col = 1, 4 do
-                colsTbl[#colsTbl + 1] = ("R%02X:0x%04X"):format(rn, Hardware.cpu.registers[rn] or 0)
-                rn = rn + 1
+local total_sleep_time = 0
+
+if jit.os == "Windows" then
+    ffi.cdef [[
+    typedef long long LARGE_INTEGER;
+    int QueryPerformanceCounter(LARGE_INTEGER *lpPerformanceCount);
+    int QueryPerformanceFrequency(LARGE_INTEGER *lpFrequency);
+    void Sleep(unsigned long ms);
+  ]]
+
+    local freq_ptr = ffi.new("LARGE_INTEGER[1]")
+    assert(ffi.C.QueryPerformanceFrequency(freq_ptr) ~= 0, "QueryPerformanceFrequency failed")
+    local freq = tonumber(freq_ptr[0])
+    local counter_ptr = ffi.new("LARGE_INTEGER[1]")
+
+    jit_time = function()
+        ffi.C.QueryPerformanceCounter(counter_ptr)
+        return tonumber(counter_ptr[0]) / freq
+    end
+
+    sleep = function(sec)
+        ffi.C.Sleep(sec * 1000)
+        total_sleep_time = total_sleep_time + sec
+    end
+
+else
+    ffi.cdef [[
+    struct timespec { long tv_sec; long tv_nsec; };
+    int clock_gettime(int clk_id, struct timespec *tp);
+    int nanosleep(const struct timespec *req, struct timespec *rem);
+  ]]
+    local CLOCK_MONOTONIC = 1
+    local ts = ffi.new("struct timespec[1]")
+
+    jit_time = function()
+        ffi.C.clock_gettime(CLOCK_MONOTONIC, ts)
+        return tonumber(ts[0].tv_sec) + tonumber(ts[0].tv_nsec) * 1e-9
+    end
+
+    sleep = function(sec)
+        local s = math.floor(sec)
+        ts[0].tv_sec = s
+        ts[0].tv_nsec = (sec - s) * 1e9
+        ffi.C.nanosleep(ts, nil)
+        total_sleep_time = total_sleep_time + sec
+    end
+end
+
+get_total_sleep_time = function()
+    return total_sleep_time
+end
+
+JIT_TIME = jit_time
+SLEEP = sleep
+
+local function emptyFunction(phase)
+    -- This function is used when headless mode is enabled
+    -- It does nothing but allows the CPU to cycle without displaying anything
+end
+
+local hertz = 0
+local rollingHertz = 0
+local resetTime = jit_time()
+local thisExecTime = 0
+local thisDisplayTime = 0
+local displayTimes = {}
+
+local function display(phase)
+    local now = jit_time()
+    local uptime = now - resetTime
+
+    local totalSleepTime = get_total_sleep_time()
+    local sleepTimeSinceLast = totalSleepTime - (phaseHistory[2] and phaseHistory[2].sleepTimeSoFar or 0)
+
+    -- record this phase
+    table.insert(phaseHistory, 1, {
+        phase = phase,
+        endTime = now,
+        execTime = thisExecTime,
+        sleepTimeSoFar = totalSleepTime,
+        sleepTimeSinceLast = sleepTimeSinceLast,
+        phaseTime = (thisExecTime - sleepTimeSinceLast) - (displayTimes[#displayTimes] or 0)
+    })
+
+    -- handle reset
+    if phase == "Resetting CPU..." then
+        cycles = 0
+        resetTime = jit_time()
+    end
+
+    -- recalc hertz on “Top of cycle” only
+    if phase == "Top of cycle: Fetching..." then
+        local sumExec = 0
+        for i = 2, #phaseHistory do
+            local entry = phaseHistory[i]
+            if entry.phase == "Top of cycle: Fetching..." then
+                break
             end
-            renderLine(3 + row, table.concat(colsTbl, " | "))
+            local nextEnd = (i < #phaseHistory) and phaseHistory[i + 1].endTime or now
+            local execSec = entry.endTime - nextEnd - hangTime
+            if execSec > 0 then
+                sumExec = sumExec + execSec
+            end
         end
+        hertz = (sumExec > 0) and (1 / sumExec) or 0
+        -- rolling average of the last 10 hertz values
+        rollingHertz = (hertz * 0.1) + (rollingHertz * 0.9)
     end
 
-    -- Buses
-    renderLine(8, "Buses:")
-    renderLine(9, ("Address:       0x%04X"):format(Hardware.bus.address or 0))
-    renderLine(10, ("Data:          0x%04X"):format(Hardware.bus.data or 0))
-    renderLine(11, "Write Line:    " .. tostring(Hardware.bus.writeLine))
-    renderLine(12, "Reset Line:    " .. tostring(Hardware.bus.resetLine))
-    renderLine(13, "Clock Line:    " .. tostring(Hardware.bus.clock))
+    -- render header
+    term.wipe()
+    term.line(term.center("ALC 1 INSTRUCTION SET CPU EMULATOR"))
+    term.line(term.center("Version: " .. version))
+    term.line(term.padLeft("CPU", 2) .. "Cycle: " .. cycles .. " | Uptime: " .. string.format("%.3f", uptime * 1000) ..
+                  " ms" .. " | CPU Hertz: " .. string.format("%.2f", rollingHertz or 0) ..
+                  " (" .. string.format("%.2f", hertz) .. ")")
+    term.line("Phase: " .. phase)
+    term.line("Clock: " .. tostring(Hardware.cpu.clock))
+    term.line("")
 
-    -- Misc Memory
-    renderLine(15, "Misc Memory:")
-    renderLine(16, ("PC:            0x%04X"):format(Hardware.cpu.miscMemory.programCounter or 0))
-    renderLine(17, "Flag Zero:     " .. tostring(Hardware.cpu.miscMemory.flagWasZero))
-    renderLine(18, "Flag Negative: " .. tostring(Hardware.cpu.miscMemory.flagWasNegative))
-    renderLine(19, "Advance PC?:   " .. tostring(Hardware.cpu.miscMemory.shouldAdvancePC))
+    -- bus state
+    term.line(term.padLeft("Bus", 2))
+    term.line("Reset Line: " .. tostring(Hardware.bus.resetLine))
+    term.line("Data Bus : 0x" .. string.format("%04X", Hardware.bus.data))
+    term.line("Address  : 0x" .. string.format("%04X", Hardware.bus.address))
+    term.line("Write Line: " .. tostring(Hardware.bus.writeLine))
+    term.line("Clock Line: " .. tostring(Hardware.bus.clock))
+    term.line("")
 
-    -- Decoder
-    renderLine(21, "Decoder:")
-    renderLine(22, "PendingFetch:  " .. tostring(Hardware.cpu.decoder.pendingFetch))
-    renderLine(23, ("OverflowReg:   0x%04X"):format(Hardware.cpu.decoder.overflowRegister or 0))
-    renderLine(24, ("OpcodeBus:     0x%X"):format(Hardware.cpu.decoder.opcodeBus or 0))
-    renderLine(25, ("DestBus:       0x%X"):format(Hardware.cpu.decoder.destinationBus or 0))
-    renderLine(26, ("ContentBus:    0x%06X"):format(Hardware.cpu.decoder.contentBus or 0))
-
-    -- History
-    renderLine(28, "History:")
-    local historyStart = 29
-    for i = 1, #phaseHistory do
-        if historyStart + i - 1 <= rows then
-            renderLine(historyStart + i - 1, phaseHistory[i])
+    -- registers
+    term.line(term.padLeft("Registers", 2))
+    for row = 0, 3 do
+        local line = "  "
+        for col = 0, 3 do
+            local idx = row * 4 + col
+            line = line .. string.format("r%X:0x%04X ", idx, Hardware.cpu.registers[idx])
         end
+        term.line(line)
     end
 
-    flush()
-    os.execute("sleep 1")
+    -- memory usage
+    term.line("")
+    term.line(term.padLeft("Memory", 2))
+    term.line("  RAM In use: " .. (Hardware.mem.addressesUsed * 2) .. " bytes")
+
+    -- misc CPU state
+    term.line("")
+    term.line(term.padLeft("Misc Memory", 2))
+    local mm = Hardware.cpu.miscMemory
+    term.line("  PC           : 0x" .. string.format("%04X", mm.programCounter))
+    term.line("  Flag Zero    : " .. tostring(mm.flagWasZero))
+    term.line("  Flag Negative: " .. tostring(mm.flagWasNegative))
+    term.line("  Advance PC   : " .. tostring(mm.shouldAdvancePC))
+    term.line("")
+
+    -- phase history log
+    term.line(term.padLeft("Phase History", 2))
+    local maxPhaseLen = 0
+    for _, d in ipairs(phaseHistory) do
+        if #d.phase > maxPhaseLen then
+            maxPhaseLen = #d.phase
+        end
+    end
+    for i, data in ipairs(phaseHistory) do
+        if i > 10 then
+            term.line("      ...")
+            -- cull the remaining entries
+            phaseHistory = {unpack(phaseHistory, 1, i)}
+            break
+        end
+        local prefix = (i == 1) and "  --> " or "      "
+        local nextTime = (i < #phaseHistory) and phaseHistory[i + 1].endTime or now
+        local execMs = data.execTime
+        local padded = data.phase .. string.rep(" ", maxPhaseLen - #data.phase)
+        term.line(prefix .. padded .. " | Phase Time: " .. string.format("%.3f", data.phaseTime) ..
+                      " ms | Sleep Time: " .. string.format("%.3f", data.sleepTimeSinceLast) ..
+                      " ms | Exec Time: " .. string.format("%.3f", execMs) .. " ms | Display Time: " ..
+                      string.format("%.3f", displayTimes[i] or 0) .. " ms")
+    end
+
+    term.render()
+
+    thisDisplayTime = jit_time() - now
+    table.insert(displayTimes, thisDisplayTime)
+end
+
+local nextTime = 0
+
+local function benchmarkedDisplay(phase)
+    -- benchmark the display function and error out if it takes longer than 10ms to run
+    local start = jit_time()
+    local ok, err = pcall(display, phase)
+    local elapsed = jit_time() - start
+    if elapsed > 0.05 then
+        error(string.format("Display function took too long to execute: %.3f seconds", elapsed))
+    end
+    -- hang for a short time to simulate the CPU clock speed
+    nextTime = nextTime + hangTime
+    local now = jit_time()
+    local sleepTime = nextTime - now
+    if sleepTime > 0 then
+        sleep(sleepTime)
+    else
+        nextTime = now
+    end
+
 end
 
 Hardware.bus.resetLine = true
 
-while true do
-    Hardware.cpu.cycle(displayFunction)
+local programStart = jit_time()
+cycles = 0
+
+rollingHertz = 0
+
+local ok, err = pcall(function()
+    while true do
+        startTime = jit_time()
+        if headless then
+            Hardware.cpu.cycle(emptyFunction)
+        else
+            Hardware.cpu.cycle(benchmarkedDisplay)
+        end
+        thisExecTime = (jit_time() - startTime) * 1000 -- in milliseconds
+        rollingHertz = (rollingHertz * 0.95) + (1 / thisExecTime * 0.05) -- rolling average
+        cycles = cycles + 1
+    end
+end)
+
+if not ok then
+    local crashTime = jit_time()
+    local uptime = crashTime - programStart
+    benchmarkedDisplay("Crashing...")
+    term.printBenchmarks()
+    print(string.format("Benchmark aborted after %.3f seconds (%d cycles executed).", uptime, cycles))
+    print(string.format("Uptime: %.3f ms.", uptime * 1000))
+    local hertz = (uptime > 0) and (cycles / uptime) or 0
+    -- print hertz and rolling hertz
+    print(string.format("CPU Hertz: %.2f (rolling: %.2f)", hertz, rollingHertz))
+    print("Error: " .. err)
 end

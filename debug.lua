@@ -1,0 +1,2 @@
+DebugMode = true
+require "main"
