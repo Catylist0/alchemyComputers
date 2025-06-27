@@ -1,4 +1,5 @@
 local version = "0.0.1"
+print("Starting...")
 -- Set to true to run without terminal display
 local headless = true
 if DebugMode then
@@ -211,6 +212,9 @@ local function benchmarkedDisplay(phase)
     -- benchmark the display function and error out if it takes longer than 10ms to run
     local start = jit_time()
     local ok, err = pcall(display, phase)
+    if not ok then
+        error("Display function failed: " .. tostring(err))
+    end
     local elapsed = jit_time() - start
     if elapsed > 0.05 then
         error(string.format("Display function took too long to execute: %.3f seconds", elapsed))
@@ -235,6 +239,7 @@ cycles = 0
 rollingHertz = 0
 
 local ok, err = pcall(function()
+    print("Starting CPU cycles...")
     while true do
         startTime = jit_time()
         if headless then
@@ -248,7 +253,10 @@ local ok, err = pcall(function()
     end
 end)
 
+print("An error occurred during execution...")
+
 if not ok then
+    print("An error occurred during execution...")
     local crashTime = jit_time()
     local uptime = crashTime - programStart
     benchmarkedDisplay("Crashing...")

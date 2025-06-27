@@ -1,0 +1,2 @@
+-- Go to first address on the magnetic tape
+JMP 256

@@ -1,26 +1,31 @@
 local Hardware = {}
 local bit = require("bit")
 
+-- load the tape.txt file
+local tapeFile = "tape.txt"
+local tapeHandle = io.open(tapeFile, "r")
+if not tapeHandle then
+    error("Could not open tape file: " .. tapeFile)
+end
+for address, value in tapeHandle:lines() do
+    Hardware.mem[address] = value
+end
+tapeHandle:close()
+
 -- Cross-platform file mtime check (replaces lfs)
 local function get_mtime(file)
     if jit.os == "Windows" then
         local cmd = 'powershell -Command "(Get-Item \'' .. file .. '\').LastWriteTimeUtc.ToFileTimeUtc()"'
         local handle = io.popen(cmd)
-        if not handle then
-            return nil
-        end
+        if not handle then return nil end
         local output = handle:read("*a")
         handle:close()
         local fileTime = tonumber(output)
-        if not fileTime then
-            return nil
-        end
+        if not fileTime then return nil end
         return fileTime / 10000000 - 11644473600
     else
         local handle = io.popen("stat -c %Y " .. file)
-        if not handle then
-            return nil
-        end
+        if not handle then return nil end
         local result = handle:read("*a")
         handle:close()
         return tonumber(result)
@@ -32,13 +37,13 @@ Hardware.bus = {
     address = 0x0000,
     writeLine = false,
     resetLine = false,
-    clock = true
+    clock = true,
 }
 
 Hardware.mem = {}
 
 local function formatMem()
-    for i = 0, 0xFF do
+    for i = 0, 0xFF do 
         Hardware.mem[i] = 0x0000
     end
     for i = 0x0100, 0xFFFF do
@@ -53,25 +58,46 @@ Hardware.mem.addressesUsed = 0x0000
 do
     local mem = Hardware.mem
 
-    function mem.read()
-        if Hardware.bus.writeLine then
-            return nil
+    mem.addressSpace = {
+        [0x0000] = "ROM",
+        [0x0100] = "MAG", -- When loaded or written to, will forward to the tape head and advance the storage tape
+        [0x0101] = "PERIPHERAL", -- each peripheral knows when it is read or written to and has a behavior hooked in, disk drives work like the magnetic tape, advancing when read or written.
+        [0x0110] = "RAM",
+    }
+
+    local function returnAddressSpace(address)
+        for k, v in pairs(mem.addressSpace) do
+            if address >= k then
+                return v
+            end
         end
+        return "NIL"
+    end
+
+    function mem.read()
+        if Hardware.bus.writeLine then return nil end
         local address = Hardware.bus.address
-        local value = mem[address]
-        Hardware.bus.data = value
+        local addressSpace = returnAddressSpace(address)
+        if addressSpace == "ROM" then
+            local value = mem[address]
+            Hardware.bus.data = value
+        elseif addressSpace == "RAM" then
+            local value = mem[address]
+            Hardware.bus.data = value
+        elseif addressSpace == "MAG" then
+            -- Handle magnetic tape read
+            --mem.magtape 
+        end
     end
 
     function mem.write()
-        if not Hardware.bus.writeLine then
-            return nil
-        end
+        if not Hardware.bus.writeLine then return nil end
         local address = Hardware.bus.address
         local value = Hardware.bus.data
         mem[address] = value
         if not release then
             if not ramUseMatrix[address] then
-                ramUseMatrix[address] = true
+                ramUseMatrix[address] = true 
                 Hardware.mem.addressesUsed = Hardware.mem.addressesUsed + 1
             end
         else
@@ -93,18 +119,12 @@ do
     }
 
     cpu.registers = {}
-    for i = 0, 0xF do
-        cpu.registers[i] = 0x0000
-    end
+    for i = 0, 0xF do cpu.registers[i] = 0x0000 end
 
     cpu.decoder = {
         twoCycleOpcodes = {
-            [0x1] = true,
-            [0x2] = true,
-            [0x3] = true,
-            [0x6] = true,
-            [0x7] = true,
-            [0x8] = true
+            [0x1] = true, [0x2] = true, [0x3] = true,
+            [0x6] = true, [0x7] = true, [0x8] = true
         },
         pendingFetch = false,
         overflowRegister = 0x0000,
@@ -115,43 +135,31 @@ do
         decode = function()
             local raw = Hardware.bus.data
             if not cpu.decoder.pendingFetch then
-                -- Phase 1: initial decode
                 local top = bit.rshift(raw, 12)
                 local dest = bit.band(bit.rshift(raw, 8), 0xF)
                 cpu.decoder.opcodeBus = top
                 cpu.decoder.destinationBus = dest
-
-                if cpu.decoder.twoCycleOpcodes[top] then
-                    -- needs extra word
+                if cpu.decoder.twoCycleOpcodes[top] then -- if this is a two-cycle opcode -> then we want to populate the overflow register with the raw data
+                    -- Case: two-cycle opcode, we need to wait for the next cycle to fetch the rest of the data so we populate the overflow register
                     cpu.decoder.pendingFetch = true
                     cpu.decoder.overflowRegister = raw
                     cpu.clock = false
                     return
                 end
-
-                -- single-cycle: zero-pad to 24 bits
-                cpu.decoder.contentBus = bit.lshift(raw, 8)
+                -- Case: single-cycle opcode with no overflow in the register
+                cpu.decoder.contentBus = 0x000000 -- reset content bus
+                cpu.decoder.contentBus = bit.band(raw, 0xFFFF) -- drop the 16bit overflow into the lower half of the content bus
                 return
             end
-
-            -- Phase 2: extended fetch
-            local ext = bit.band(Hardware.bus.data, 0xFFFF)
+            -- Case: two-cycle opcode, and the overflow register is populated, so we know we can go ahead and decode the instruction
+            cpu.decoder.contentBus = 0x000000 -- reset content bus
+            local ext = Hardware.bus.data
             local first = cpu.decoder.overflowRegister
-            local top = bit.rshift(first, 12)
-            local dest = bit.band(bit.rshift(first, 8), 0xF)
-
-            cpu.decoder.opcodeBus = top
-            cpu.decoder.destinationBus = dest
-
-            -- assemble 24 bits: [ first.low8 ][ ext.high8 ][ ext.low8 ]
             local low = bit.band(first, 0xFF)
-            cpu.decoder.contentBus = bit.bor(bit.lshift(low, 16), ext)
-
+            cpu.decoder.opcodeBus = bit.rshift(first, 12)
+            cpu.decoder.destinationBus = bit.band(bit.rshift(first, 8), 0xF)
+            cpu.decoder.contentBus = bit.bor(bit.lshift(low, 16), bit.band(ext, 0xFFFF))
             cpu.decoder.pendingFetch = false
-        end,
-
-        execute = function()
-            operations[cpu.decoder.opcodeBus](cpu.decoder.destinationBus, cpu.decoder.contentBus)
         end
     }
 
@@ -164,8 +172,7 @@ do
     end
 
     cpu.instructions = {
-        [0x0] = function(rd, args)
-        end,
+        [0x0] = function(rd, args) end,
 
         [0x1] = function(rd, args)
             local addr = combineNibbles(args, 1, 6)
@@ -235,7 +242,8 @@ do
         [0x9] = function(rd, args)
             local rn = args[2]
             local rm = args[1]
-            Hardware.cpu.registers[rd] = bit.bnot(bit.band(Hardware.cpu.registers[rn], Hardware.cpu.registers[rm]))
+            Hardware.cpu.registers[rd] =
+                bit.bnot(bit.band(Hardware.cpu.registers[rn], Hardware.cpu.registers[rm]))
         end,
 
         [0xA] = function(rd, args)
@@ -252,8 +260,13 @@ do
     cpu.clock = true
 
     function cpu.cycle(displayFunction)
-        os.exit(0) -- ensure we are running in a luajit instance
-        local filesToCheck = {"hardware.lua", "main.lua", "ide.lua", "debug.lua", "term.lua"}
+        --os.exit(0) -- ensure we are running in a luajit instance
+        local filesToCheck = {
+            "hardware.lua",
+            "main.lua",
+            "debug.lua",
+            "term.lua"
+        }
         for _, file in ipairs(filesToCheck) do
             local mtime = get_mtime(file)
             if mtime and os.time() - mtime < 1 then
@@ -301,11 +314,11 @@ do
         local cb = cpu.decoder.contentBus
         local args = {}
         for i = 0, 5 do
-            args[i + 1] = bit.band(bit.rshift(cb, i * 4), 0xF) -- pull out nibbles (4 bits 16 decimal each)
+            args[i+1] = bit.band(bit.rshift(cb, i*4), 0xF) -- pull out nibbles (4 bits 16 decimal each)
         end
 
         local opc = cpu.decoder.opcodeBus
-        local rd = cpu.decoder.destinationBus
+        local rd  = cpu.decoder.destinationBus
         cpu.instructions[opc](rd, args)
 
         displayFunction("Instruction Executed: Incrementing Program Counter...")
