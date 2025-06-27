@@ -91,8 +91,8 @@ local function assemble(src)
         local hexWords = {}
         local opc = opcodes[opname]
         local rd  = vals[1] or 0
-        local rn  = vals[2] or 0
-        local rm  = vals[3] or 0
+        local rn  = (rule.argTypes[2]=="register") and (vals[2] or 0) or 0
+        local rm  = (rule.argTypes[3]=="register") and (vals[3] or 0) or 0
 
         -- first word: [ opcode(4) | Rd(4) | Rn(4) | Rm(4) ]
         local w1 = bit.bor(

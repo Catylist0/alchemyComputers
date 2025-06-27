@@ -1,4 +1,18 @@
--- Go to first address on the magnetic tape
 NOP -- start with NOP
-ADDI r2 r0 256
-JMP r2
+--ADDI r2 r0 256
+--JMP r2
+--test program, change all the registers
+ADDI r2 r0 0x1002
+ADDR r3 r2 r2
+ADDR r4 r3 r2
+ADDR r5 r4 r2
+ADDR r6 r5 r2
+ADDR r7 r6 r2
+ADDR r8 r7 r2
+ADDR r9 r8 r2
+ADDR r10 r9 r2
+ADDR r11 r10 r2
+ADDR r12 r11 r2
+ADDR r13 r12 r2
+ADDR r14 r13 r2
+ADDR r15 r14 r2

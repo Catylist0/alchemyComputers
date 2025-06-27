@@ -11,7 +11,7 @@ local term = require "term"
 local Hardware = require "hardware"
 
 local phaseHistory = {}
-local hangTime = 1 -- seconds to hang after displaying each phase
+local hangTime = 0.1 -- seconds to hang after displaying each phase
 
 local cycles = 0
 local startTime = 0
@@ -146,7 +146,7 @@ local function display(phase)
     local decoder = Hardware.cpu.decoder
     term.line("Current Opcode: 0x" .. string.format("%X", decoder.opcodeBus) .. " (" .. opCodeToInstruction[decoder.opcodeBus] .. ")")
     -- destination is 4 nibbles, so we can display it as a hex value with 4 digits
-    term.line("Current Destination: 0x" .. string.format("%04X", decoder.destinationBus))
+    term.line("Current Destination: 0x" .. string.format("%01X", decoder.destinationBus))
     term.line("Current Rn: 0x" .. string.format("%X", decoder.rnBus)) 
     term.line("Current Rm: 0x" .. string.format("%X", decoder.rmBus))
     term.line("Content Bus: 0x" .. string.format("%04X", decoder.contentBus))
@@ -237,11 +237,18 @@ local ok, err = pcall(function()
         if headless then
             Hardware.cpu.cycle(emptyFunction)
         else
+            thisExecTime = (JIT_TIME() - startTime) * 1000 -- in milliseconds
+            rollingHertz = (rollingHertz * 0.95) + (1 / thisExecTime * 0.05) -- rolling average
             Hardware.cpu.cycle(benchmarkedDisplay)
         end
-        thisExecTime = (JIT_TIME() - startTime) * 1000 -- in milliseconds
-        rollingHertz = (rollingHertz * 0.95) + (1 / thisExecTime * 0.05) -- rolling average
         cycles = cycles + 1
+        if cycles % 100 == 0 and headless then
+            local now = JIT_TIME()
+            local uptime = now - programStart
+            term.line(string.format("Cycles: %d | Uptime: %.3f ms | CPU Hertz: %.2f (rolling: %.2f)", 
+                cycles, uptime * 1000, (cycles / uptime), rollingHertz))
+            term.render()
+        end
     end
 end)
 
@@ -251,7 +258,6 @@ if not ok then
     print("An error occurred during execution...")
     local crashTime = JIT_TIME()
     local uptime = crashTime - programStart
-    benchmarkedDisplay("Crashing...")
     term.printBenchmarks()
     print(string.format("Benchmark aborted after %.3f seconds (%d cycles executed).", uptime, cycles))
     print(string.format("Uptime: %.3f ms.", uptime * 1000))
@@ -259,4 +265,7 @@ if not ok then
     -- print hertz and rolling hertz
     print(string.format("CPU Hertz: %.2f (rolling: %.2f)", hertz, rollingHertz))
     print("Error: " .. err)
+    -- print callstack
+    local traceback = debug.traceback()
+    print(traceback)
 end

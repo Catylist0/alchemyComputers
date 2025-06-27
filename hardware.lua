@@ -63,6 +63,7 @@ local ramUseMatrix = {}
 Hardware.mem.addressesUsed = 0x0000
 
 do
+    formatMem() -- Initialize memory
     local mem = Hardware.mem
 
     mem.addressSpace = {
@@ -82,20 +83,20 @@ do
     end
 
     function mem.read()
-        if Hardware.bus.writeLine then return nil end
+        if Hardware.bus.writeLine then return end
         local address = Hardware.bus.address
-        local addressSpace = returnAddressSpace(address)
-        if addressSpace == "ROM" then
-            local value = mem[address]
-            Hardware.bus.data = value
-        elseif addressSpace == "RAM" then
-            local value = mem[address]
-            Hardware.bus.data = value
-        elseif addressSpace == "MAG" then
-            -- Handle magnetic tape read
-            --mem.magtape 
+        local space   = returnAddressSpace(address)
+        local value
+        if space == "ROM" or space == "RAM" then
+            value = mem[address]
+        elseif space == "MAG" then
+            -- TODO: read tape into `value`
+        else
+            value = 0  -- fallback so bus.data is never left nil
         end
+        Hardware.bus.data = value or 0
     end
+
 
     function mem.write()
         if not Hardware.bus.writeLine then return nil end
@@ -179,6 +180,13 @@ do
             local rm      = cpu.decoder.rmBus
             local payload = cpu.decoder.contentBus
 
+            -- assert all of these are valid and the correct length
+            assert(type(op) == "number" and op >= 0 and op <= 0xF, "Opcode must be a number between 0 and 15")
+            assert(type(rd) == "number" and rd >= 0 and rd <= 0xF, "Destination register must be a number between 0 and 15")
+            assert(type(rn) == "number" and rn >= 0 and rn <= 0xF, "Rn register must be a number between 0 and 15")
+            assert(type(rm) == "number" and rm >= 0 and rm <= 0xF, "Rm register must be a number between 0 and 15")
+            assert(type(payload) == "number" and payload >= 0 and payload <= 0xFFFF, "Payload must be a number between 0 and 65535")
+
             cpu.instructions[op](rd, rn, rm, payload)
         end,
     }
@@ -208,6 +216,7 @@ do
         end,
 
         [0x3] = function(rd, rn, rm, payload)  -- ADDI
+            -- ADDI is an immediate addition, where payload is a 16-bit value
             cpu.registers[rd] = cpu.registers[rn] + payload
         end,
 
@@ -238,7 +247,7 @@ do
         [0x8] = function(rd, rn, rm, payload)  -- JMPN
             if cpu.miscMemory.flagWasNegative then
                 cpu.miscMemory.shouldAdvancePC = false
-                cpu.miscMemory.programCounter  = cpu.registers[rd]
+                cpu.miscMemory.programCounter  = cpu.registers[rd] -- set the program counter to the value in rd
             end
         end,
 
@@ -322,11 +331,7 @@ do
             args[i+1] = bit.band(bit.rshift(cb, i*4), 0xF) -- pull out nibbles (4 bits 16 decimal each)
         end
 
-        local opc = cpu.decoder.opcodeBus
-        local rd  = cpu.decoder.destinationBus
-        cpu.instructions[opc](rd, args)
-
-        displayFunction("Instruction Executed: " .. string.format("0x%X", opc) .. " to register " .. rd)
+        cpu.decoder.execute()
         cpu.clock = false
     end
 end
