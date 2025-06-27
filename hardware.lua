@@ -260,6 +260,7 @@ do
     cpu.clock = true
 
     function cpu.cycle(displayFunction)
+        cpu.miscMemory.shouldAdvancePC = true
         --os.exit(0) -- exit ripple if this is uncommented - will not launch again until commented out
         local filesToCheck = {
             "hardware.lua",
@@ -279,6 +280,10 @@ do
         end
 
         assert(type(displayFunction) == "function", "Display function must be a function")
+        
+        if cpu.miscMemory.shouldAdvancePC then
+            cpu.miscMemory.programCounter = cpu.miscMemory.programCounter + 1
+        end
 
         cpu.clock = true
 
@@ -321,11 +326,7 @@ do
         local rd  = cpu.decoder.destinationBus
         cpu.instructions[opc](rd, args)
 
-        displayFunction("Instruction Executed: Incrementing Program Counter...")
-        if cpu.miscMemory.shouldAdvancePC then
-            cpu.miscMemory.programCounter = cpu.miscMemory.programCounter + 1
-        end
-        cpu.miscMemory.shouldAdvancePC = true
+        displayFunction("Instruction Executed: " .. string.format("0x%X", opc) .. " to register " .. rd)
         cpu.clock = false
     end
 end
