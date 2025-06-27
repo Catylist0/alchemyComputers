@@ -123,8 +123,7 @@ do
 
     cpu.decoder = {
         twoCycleOpcodes = {
-            [0x1] = true, [0x2] = true, [0x3] = true,
-            [0x6] = true, [0x7] = true, [0x8] = true
+            [0x1] = true, [0x2] = true, [0x3] = true
         },
         pendingFetch = false,
         overflowRegister = 0x0000,
@@ -172,9 +171,9 @@ do
     end
 
     cpu.instructions = {
-        [0x0] = function(rd, args) end,
+        [0x0] = function(rd, args) end, -- NOP (No Operation)
 
-        [0x1] = function(rd, args)
+        [0x1] = function(rd, args) -- LOAD
             local addr = combineNibbles(args, 1, 6)
             Hardware.bus.writeLine = false
             Hardware.bus.address = addr
@@ -184,7 +183,7 @@ do
             Hardware.bus.address = 0
         end,
 
-        [0x2] = function(rd, args)
+        [0x2] = function(rd, args) -- STORE
             local addr = combineNibbles(args, 1, 6)
             Hardware.bus.writeLine = true
             Hardware.bus.address = addr
@@ -195,19 +194,19 @@ do
             Hardware.bus.address = 0
         end,
 
-        [0x3] = function(rd, args)
+        [0x3] = function(rd, args) -- ADDI (Add Immediate)
             local rn = args[1]
             local imm = combineNibbles(args, 2, 5)
             Hardware.cpu.registers[rd] = Hardware.cpu.registers[rn] + imm
         end,
 
-        [0x4] = function(rd, args)
+        [0x4] = function(rd, args) -- ADDR (Add Register)
             local rn = args[2]
             local rm = args[1]
             Hardware.cpu.registers[rd] = Hardware.cpu.registers[rn] + Hardware.cpu.registers[rm]
         end,
 
-        [0x5] = function(rd, args)
+        [0x5] = function(rd, args) -- SUBR (Subtract Register)
             local rn = args[2]
             local rm = args[1]
             local res = Hardware.cpu.registers[rn] - Hardware.cpu.registers[rm]
@@ -216,42 +215,45 @@ do
             Hardware.cpu.registers[rd] = res
         end,
 
-        [0x6] = function(_, args)
+        [0x6] = function(_, args) -- JMP (Jump)
             cpu.miscMemory.shouldAdvancePC = false
-            local addr = combineNibbles(args, 1, 5)
+            -- addr is the value of the register at args[1] (the first word)
+            local addr = cpu.registers[args[1]]
             cpu.miscMemory.programCounter = addr
             Hardware.cpu.registers[0x1] = addr
         end,
 
-        [0x7] = function(_, args)
-            cpu.miscMemory.shouldAdvancePC = false
-            local addr = combineNibbles(args, 1, 5)
+        [0x7] = function(_, args) -- JMPZ (Jump if Zero)
             if cpu.miscMemory.flagWasZero then
+                cpu.miscMemory.shouldAdvancePC = false
+                -- addr is the value of the register at args[1] (the first word)
+                local addr = cpu.registers[args[1]]
                 cpu.miscMemory.programCounter = addr
             end
         end,
 
-        [0x8] = function(_, args)
-            cpu.miscMemory.shouldAdvancePC = false
-            local addr = combineNibbles(args, 1, 5)
+        [0x8] = function(_, args) -- JMPN (Jump if Negative)
             if cpu.miscMemory.flagWasNegative then
+                cpu.miscMemory.shouldAdvancePC = false
+                -- addr is the value of the register at args[1] (the first word)
+                local addr = cpu.registers[args[1]]
                 cpu.miscMemory.programCounter = addr
             end
         end,
 
-        [0x9] = function(rd, args)
+        [0x9] = function(rd, args) -- NAND (Bitwise NAND)
             local rn = args[2]
             local rm = args[1]
             Hardware.cpu.registers[rd] =
                 bit.bnot(bit.band(Hardware.cpu.registers[rn], Hardware.cpu.registers[rm]))
         end,
 
-        [0xA] = function(rd, args)
+        [0xA] = function(rd, args) -- SHIFTL (Shift Left)
             local rn = args[2]
             Hardware.cpu.registers[rd] = bit.lshift(Hardware.cpu.registers[rn], 1)
         end,
 
-        [0xB] = function(rd, args)
+        [0xB] = function(rd, args) -- SHIFTR (Shift Right)
             local rn = args[2]
             Hardware.cpu.registers[rd] = bit.rshift(Hardware.cpu.registers[rn], 1)
         end

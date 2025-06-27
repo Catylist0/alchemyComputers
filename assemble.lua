@@ -16,9 +16,9 @@ inst.STORE            = { name = "STORE", args = { "Rd", "address" }, argTypes =
 inst.ADDI             = { name = "ADDI", args = { "Rd", "Rn", "Imm" }, argTypes = { "register", "register", "immediate" } }
 inst.ADDR             = { name = "ADDR", args = { "Rd", "Rn", "Rm" }, argTypes = { "register", "register", "register" } }
 inst.SUBR             = { name = "SUBR", args = { "Rd", "Rn", "Rm" }, argTypes = { "register", "register", "register" } }
-inst.JMP              = { name = "JMP", args = { "address" }, argTypes = { "address" } }
-inst.JMPZ             = { name = "JMPZ", args = { "address" }, argTypes = { "address" } }
-inst.JMPN             = { name = "JMPN", args = { "address" }, argTypes = { "address" } }
+inst.JMP              = { name = "JMP", args = { "Rd" }, argTypes = { "register" } }
+inst.JMPZ             = { name = "JMPZ", args = { "Rd" }, argTypes = { "register" } }
+inst.JMPN             = { name = "JMPN", args = { "Rd" }, argTypes = { "register" } }
 inst.NAND             = { name = "NAND", args = { "Rd", "Rn", "Rm" }, argTypes = { "register", "register", "register" } }
 inst.SHIFTL           = { name = "SHIFTL", args = { "Rd", "Rn" }, argTypes = { "register", "register" } }
 inst.SHIFTR           = { name = "SHIFTR", args = { "Rd", "Rn" }, argTypes = { "register", "register" } }
